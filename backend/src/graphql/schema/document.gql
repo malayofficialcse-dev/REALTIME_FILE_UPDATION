@@ -1,0 +1,17 @@
+type Document {
+    id: ID!
+    title: String!
+    content: String!
+}
+
+extend type Query {
+    documents: [Document]
+}
+
+extend type Mutation {
+    updateDocument(id: ID!,content:String!) :Document
+}
+
+extend type subscription {
+    documentUpdated: Document
+}

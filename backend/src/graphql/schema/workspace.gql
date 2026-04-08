@@ -1,0 +1,4 @@
+type Workspace {
+    id: ID!
+    name:String!
+}
