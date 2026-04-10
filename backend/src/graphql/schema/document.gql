@@ -2,16 +2,58 @@ type Document {
     id: ID!
     title: String!
     content: String!
+    config: String
+    type: String! # 'text' or 'sheet'
+    workspace: Workspace!
+    createdAt: String!
+    updatedAt: String!
+}
+
+type DocumentVersion {
+    id: ID!
+    content: String!
+    createdAt: String!
+}
+
+type Presence {
+    userId: ID!
+    email: String!
+    documentId: ID!
+    cursorOffset: Int
+    cursorRow: Int
+    cursorCol: Int
+    cursorX: Float
+    cursorY: Float
+    isTyping: Boolean
+}
+
+type Message {
+    id: ID!
+    text: String!
+    sender: User!
+    documentId: ID!
+    createdAt: String!
 }
 
 extend type Query {
-    documents: [Document]
+    documents(workspaceId: ID!): [Document]
+    document(id: ID!): Document
+    activeUsers(documentId: ID!): [Presence]
+    documentVersions(documentId: ID!): [DocumentVersion]
+    messages(documentId: ID!): [Message]
 }
 
 extend type Mutation {
-    updateDocument(id: ID!,content:String!) :Document
+    createDocument(workspaceId: ID!, title: String!, type: String!): Document
+    updateDocument(id: ID!, content: String, title: String, config: String): Document
+    deleteDocument(id: ID!): Boolean
+    restoreVersion(documentId: ID!, versionId: ID!): Document
+    updatePresence(documentId: ID!, cursorOffset: Int, cursorRow: Int, cursorCol: Int, cursorX: Float, cursorY: Float, isTyping: Boolean): Presence
+    sendMessage(documentId: ID!, text: String!): Message
 }
 
-extend type subscription {
+extend type Subscription {
     documentUpdated: Document
+    presenceChanged(documentId: ID!): [Presence]
+    messageSent(documentId: ID!): Message
 }

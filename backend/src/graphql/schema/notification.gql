@@ -1,0 +1,26 @@
+type Notification {
+    id: ID!
+    userId: ID!
+    senderId: ID
+    workspaceId: ID
+    type: String!
+    role: String
+    status: String!
+    message: String
+    createdAt: String!
+    sender: User
+    workspace: Workspace
+}
+
+extend type Query {
+    myNotifications: [Notification]
+}
+
+extend type Mutation {
+    sendInvite(email: String!, workspaceId: ID!, role: String!): Notification
+    respondInvite(notificationId: ID!, accept: Boolean!): Boolean
+}
+
+extend type Subscription {
+    notificationAdded: Notification
+}

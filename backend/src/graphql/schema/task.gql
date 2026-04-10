@@ -1,0 +1,22 @@
+type Task {
+    id: ID!
+    title: String!
+    description: String
+    status: String! # 'TODO', 'IN_PROGRESS', 'REVIEW', 'DONE'
+    priority: String! # 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'
+    workspace: Workspace!
+    assignee: User
+    createdAt: String
+    updatedAt: String
+}
+
+extend type Query {
+    getTasks(workspaceId: ID!): [Task!]!
+    getTask(id: ID!): Task
+}
+
+extend type Mutation {
+    createTask(workspaceId: ID!, title: String!, status: String, priority: String, assigneeId: ID): Task
+    updateTask(id: ID!, title: String, description: String, status: String, priority: String, assigneeId: ID): Task
+    deleteTask(id: ID!): Boolean
+}

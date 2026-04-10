@@ -1,11 +1,21 @@
-import jwt from "jsonwebtoken";
+import jwt from 'jsonwebtoken';
+import dotenv from 'dotenv';
 
-export const auth = (req) => {
-    const token = req.headers.authorization || '';
+dotenv.config();
 
-    try {
-        return jwt.verify(token,'SECRET');
-    } catch (error) {
-        return null;
-    }
+export const authMiddleware = (req) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace('Bearer ', '');
+
+  if (!token) {
+    return { user: null };
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'SECRET');
+    return { user: decoded };
+  } catch (err) {
+    console.error('JWT Verification Error:', err.message);
+    return { user: null };
+  }
 };

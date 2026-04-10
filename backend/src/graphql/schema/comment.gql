@@ -1,0 +1,20 @@
+type Comment {
+    id: ID!
+    text: String!
+    user: User
+    documentId: ID!
+    cellRow: Int
+    cellCol: Int
+    charOffset: Int
+    parentId: ID
+    replies: [Comment]
+    createdAt: String
+}
+
+extend type Query {
+    comments(documentId: ID!, cellRow: Int, cellCol: Int): [Comment]
+}
+
+extend type Mutation {
+    addComment(documentId: ID!, text: String!, cellRow: Int, cellCol: Int, charOffset: Int, parentId: ID): Comment
+}
