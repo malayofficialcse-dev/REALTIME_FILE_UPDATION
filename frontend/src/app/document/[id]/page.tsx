@@ -1,6 +1,6 @@
 'use client';
 
-import { useQuery, useMutation, useSubscription, gql } from '@apollo/client';
+import { useQuery, useMutation, useSubscription, gql, useApolloClient } from '@apollo/client';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
@@ -9,7 +9,7 @@ import {
   Type, Palette, PaintBucket, Copy, Trash2, ArrowUp, ArrowDown, ArrowRight,
   Users, Plus, Moon, Sun, UserPlus, Check, Search, MessageSquare, Sparkles, Send, Activity, Upload,
   Underline, List, ListOrdered, Quote, AlignJustify, Lock, Unlock, Zap, Edit3, Eye, Bell, User,
-  PlusCircle, LayoutGrid, Layers
+  PlusCircle, LayoutGrid, Layers, Filter, ArrowUpDown, ChevronDown
 } from 'lucide-react';
 import { Providers, useTheme } from '@/components/providers';
 import * as XLSX from 'xlsx';
@@ -103,6 +103,16 @@ const GET_DOCUMENT = gql`
       id
       content
       createdAt
+    }
+  }
+`;
+
+const GET_DOC_CONTENT = gql`
+  query GetDocContent($id: ID!) {
+    document(id: $id) {
+      id
+      content
+      type
     }
   }
 `;
@@ -282,6 +292,9 @@ interface CellStyle {
 interface CellData {
   value: string;
   style?: CellStyle;
+  validation?: {
+    options: { label: string; color: string; }[];
+  };
 }
 
 export default function DocumentPage() {
@@ -380,7 +393,16 @@ export default function DocumentPage() {
   const [seriesNames, setSeriesNames] = useState<string[]>(['Revenue', 'Projections', 'Costs']);
   const [labelColIndex, setLabelColIndex] = useState(0);
   const [valueColIndices, setValueColIndices] = useState<number[]>([1]);
+  const client = useApolloClient();
   const [isDashboardMode, setIsDashboardMode] = useState(false);
+  const [externalDocs, setExternalDocs] = useState<Record<string, CellData[][]>>({});
+
+  const [filters, setFilters] = useState<Record<number, string>>({});
+  const [sortConfig, setSortConfig] = useState<{col: number, asc: boolean} | null>(null);
+
+  const [showValidationModal, setShowValidationModal] = useState(false);
+  const [validationOptions, setValidationOptions] = useState<{label: string, color: string}[]>([{label: 'Option 1', color: '#ff0000'}]);
+
   const [draggingChartId, setDraggingChartId] = useState<string | null>(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
 
@@ -1053,54 +1075,92 @@ export default function DocumentPage() {
     return { r: rowIdx, c: colIdx - 1 };
   };
 
-  const getCellValue = (r: number, c: number, grid: CellData[][]): number => {
+  const getCellValue = (r: number, c: number, grid: CellData[][], extDocs: Record<string, CellData[][]> = externalDocs): number => {
     const val = grid[r]?.[c]?.value || "0";
-    if (val.startsWith("=")) return evaluateFormula(val, grid);
+    if (val.startsWith("=")) return evaluateFormula(val, grid, extDocs);
     return parseFloat(val) || 0;
   };
 
-  const evaluateFormula = (formula: string, grid: CellData[][]): any => {
+  const evaluateFormula = (formula: string, grid: CellData[][], extDocs: Record<string, CellData[][]> = externalDocs): any => {
     if (!formula.startsWith("=")) return formula;
     try {
-      const content = formula.substring(1).toUpperCase();
+      const expr = formula.substring(1).toUpperCase();
       
-      if (content.startsWith("SUM(") || content.startsWith("AVG(") || content.startsWith("MIN(") || content.startsWith("MAX(")) {
-        const func = content.substring(0, 3);
-        const range = content.match(/\((.+)\)/)?.[1];
+      const resolvePart = (part: string) => {
+        const t = part.trim();
+        const m = t.match(/DOC\("([^"]+)"\s*,\s*"([^"]+)"\)/);
+        if (m) {
+          const title = m[1]; const cellRef = m[2];
+          const targetDoc = data?.workspace?.documents?.find((d: any) => d.title.toUpperCase() === title);
+          if (targetDoc && extDocs[targetDoc.id]) {
+            const coord = parseCellCoord(cellRef);
+            return coord ? getCellValue(coord.r, coord.c, extDocs[targetDoc.id], extDocs) : 0;
+          }
+          return 0;
+        }
+        const c = parseCellCoord(t);
+        if (c) return getCellValue(c.r, c.c, grid, extDocs);
+        return parseFloat(t) || 0;
+      };
+
+      if (expr.startsWith("SUM(") || expr.startsWith("AVG(") || expr.startsWith("MIN(") || expr.startsWith("MAX(")) {
+        const func = expr.substring(0, 3);
+        const range = expr.match(/\((.+)\)/)?.[1];
         if (!range) return "#ERR";
-        const [start, end] = range.split(":");
-        if (!start || !end) return "#ERR";
-        const s = parseCellCoord(start);
-        const e = parseCellCoord(end);
-        if (!s || !e) return "#ERR";
-        
-        const values: number[] = [];
-        for (let r = Math.min(s.r, e.r); r <= Math.max(s.r, e.r); r++) {
-          for (let c = Math.min(s.c, e.c); c <= Math.max(s.c, e.c); c++) {
-            values.push(getCellValue(r, c, grid));
+
+        let values: number[] = [];
+        if (range.startsWith("DOC(")) {
+          const m = range.match(/DOC\("([^"]+)"\s*,\s*"([^"]+)"\)/);
+          if (m) {
+            const title = m[1]; const cellRange = m[2];
+            const targetDoc = data?.workspace?.documents?.find((d: any) => d.title.toUpperCase() === title);
+            if (targetDoc && extDocs[targetDoc.id]) {
+               const docGrid = extDocs[targetDoc.id];
+               const [start, end] = cellRange.split(":");
+               const s = parseCellCoord(start);
+               const e = parseCellCoord(end || start);
+               if (s && e) {
+                  for (let r = Math.min(s.r, e.r); r <= Math.max(s.r, e.r); r++) {
+                    for (let c = Math.min(s.c, e.c); c <= Math.max(s.c, e.c); c++) {
+                      values.push(getCellValue(r, c, docGrid, extDocs));
+                    }
+                  }
+               }
+            }
+          }
+        } else {
+          const [start, end] = range.split(":");
+          if (!start || !end) return "#ERR";
+          const s = parseCellCoord(start);
+          const e = parseCellCoord(end);
+          if (!s || !e) return "#ERR";
+          
+          for (let r = Math.min(s.r, e.r); r <= Math.max(s.r, e.r); r++) {
+            for (let c = Math.min(s.c, e.c); c <= Math.max(s.c, e.c); c++) {
+              values.push(getCellValue(r, c, grid, extDocs));
+            }
           }
         }
         
         if (func === "SUM") return values.reduce((acc, v) => acc + v, 0);
-        if (func === "AVG") return values.reduce((acc, v) => acc + v, 0) / values.length;
-        if (func === "MIN") return Math.min(...values);
-        if (func === "MAX") return Math.max(...values);
+        if (func === "AVG") return values.length ? values.reduce((acc, v) => acc + v, 0) / values.length : 0;
+        if (func === "MIN") return values.length ? Math.min(...values) : 0;
+        if (func === "MAX") return values.length ? Math.max(...values) : 0;
       }
       
       const operators = ["+", "-", "*", "/"];
       for (const op of operators) {
-        if (content.includes(op)) {
-          const [p1, p2] = content.split(op);
-          const s1 = parseCellCoord(p1.trim());
-          const s2 = parseCellCoord(p2.trim());
-          if (s1 && s2) {
-            const v1 = getCellValue(s1.r, s1.c, grid);
-            const v2 = getCellValue(s2.r, s2.c, grid);
-            if (op === "+") return v1 + v2;
-            if (op === "-") return v1 - v2;
-            if (op === "*") return v1 * v2;
-            if (op === "/") return v1 / v2;
-          }
+        if (expr.includes(op)) {
+          // Simplistic split parser (supports one operator, A + B)
+          const idx = expr.indexOf(op);
+          const p1 = expr.substring(0, idx);
+          const p2 = expr.substring(idx + 1);
+          const v1 = resolvePart(p1);
+          const v2 = resolvePart(p2);
+          if (op === "+") return v1 + v2;
+          if (op === "-") return v1 - v2;
+          if (op === "*") return v1 * v2;
+          if (op === "/") return v1 / v2;
         }
       }
       return formula;
@@ -1108,6 +1168,69 @@ export default function DocumentPage() {
       console.error('Formula Evaluation Error:', e);
       return "#ERR";
     }
+  };
+
+  // Cross Document Fetcher Effect
+  useEffect(() => {
+    if (type !== 'sheet' || !content) return;
+    const fetchExternalDocs = async () => {
+      const docRefs = new Set<string>();
+      // Match DOC("Title", "Range")
+      const matches = content.matchAll(/DOC\("([^"]+)"/g);
+      for (const m of Array.from(matches)) {
+        docRefs.add(m[1].toUpperCase());
+      }
+      
+      if (docRefs.size === 0) return;
+      
+      const newExternalDocs = { ...externalDocs };
+      let changed = false;
+      const docsList = data?.workspace?.documents || basicData?.document?.workspace?.documents || [];
+      
+      for (const title of Array.from(docRefs)) {
+        const target = docsList.find((d: any) => d.title.toUpperCase() === title);
+        if (target && !newExternalDocs[target.id]) {
+          try {
+            const { data: qData } = await client.query({ query: GET_DOC_CONTENT, variables: { id: target.id } });
+            if (qData?.document?.content) {
+              newExternalDocs[target.id] = JSON.parse(qData.document.content);
+              changed = true;
+            }
+          } catch (e) { console.error("Failed to fetch cross doc", e); }
+        }
+      }
+      if (changed) setExternalDocs(newExternalDocs);
+    };
+    fetchExternalDocs();
+  }, [content, type, data, basicData, client]);
+
+  const processedGrid = useMemo(() => {
+    if (!gridData || gridData.length === 0) return [];
+    let mapped = gridData.map((row, rIdx) => ({ row, originalIndex: rIdx }));
+    Object.keys(filters).forEach(cStr => {
+       const c = parseInt(cStr);
+       if(filters[c]) {
+          const f = filters[c].toLowerCase();
+          mapped = mapped.filter(item => {
+             const val = item.row[c]?.value?.toString().toLowerCase() || "";
+             return val.includes(f);
+          });
+       }
+    });
+    if (sortConfig) {
+       mapped.sort((a, b) => {
+          const valA = evaluateFormula(a.row[sortConfig.col]?.value || "", gridData, externalDocs);
+          const valB = evaluateFormula(b.row[sortConfig.col]?.value || "", gridData, externalDocs);
+          if (valA < valB) return sortConfig.asc ? -1 : 1;
+          if (valA > valB) return sortConfig.asc ? 1 : -1;
+          return 0;
+       });
+    }
+    return mapped;
+  }, [gridData, filters, sortConfig, externalDocs]);
+
+  const getRenderedRowIndex = (originalIndex: number) => {
+    return processedGrid.findIndex(row => row.originalIndex === originalIndex);
   };
 
   const addRow = () => {
@@ -1652,6 +1775,13 @@ export default function DocumentPage() {
                     >
                       <Zap size={14} /> Live Insights
                     </button>
+                    <button 
+                      onClick={() => setShowValidationModal(true)} 
+                      disabled={!selection}
+                      className="ml-2 flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 text-white text-xs font-bold rounded shadow-lg shadow-amber-200 dark:shadow-none hover:bg-amber-600 disabled:opacity-30 transition-all"
+                    >
+                      <CheckCircle2 size={14} /> Validation
+                    </button>
                 </div>
               </div>
               <div className="p-1 px-4 flex items-center gap-3 bg-secondary/30">
@@ -1717,27 +1847,50 @@ export default function DocumentPage() {
                     <thead className="sticky top-0 z-20 bg-secondary/80 backdrop-blur-md">
                       <tr>
                           <th className="w-12 border-b border-r border-border p-2 text-[10px] font-bold text-muted-foreground select-none bg-secondary/50"></th>
-                          {gridData[0]?.map((_, i) => {
-                            const activeColUsers = activeUsers.filter(u => u.cursorCol === i);
+                          {gridData[0]?.map((_, cIdx) => {
+                            const activeColUsers = activeUsers.filter(u => u.cursorCol === cIdx);
                             const hasActive = activeColUsers.length > 0;
                             const activeUi = hasActive ? activeUsers.findIndex(u => u.userId === activeColUsers[0].userId) : 0;
                             return (
-                              <th 
-                                key={i} 
-                                className={`min-w-[120px] px-4 py-2 border-b border-r border-border text-[11px] font-bold text-center select-none transition-all ${hasActive ? 'dark:text-white animate-presence-glow' : 'text-muted-foreground'}`}
-                                style={hasActive ? {
-                                  backgroundColor: `hsl(${(activeUi * 137) % 360}, 65%, 85%)`,
-                                  color: `hsl(${(activeUi * 137) % 360}, 65%, 25%)`
-                                } : {}}
-                              >
-                                {String.fromCharCode(65 + i)}
-                              </th>
+                                <th 
+                                  key={cIdx} 
+                                  className={`min-w-[120px] px-2 py-1.5 border-b border-r border-border text-center select-none transition-all ${hasActive ? 'dark:text-white animate-presence-glow' : 'text-muted-foreground'}`}
+                                  style={hasActive ? {
+                                    backgroundColor: `hsl(${(activeUi * 137) % 360}, 65%, 85%)`,
+                                    color: `hsl(${(activeUi * 137) % 360}, 65%, 25%)`
+                                  } : {}}
+                                >
+                                  <div className="flex items-center justify-between gap-1 w-full relative group/header">
+                                     <button 
+                                       onClick={() => setSortConfig(prev => prev?.col === cIdx && prev.asc ? {col: cIdx, asc: false} : {col: cIdx, asc: true})}
+                                       className="p-1 hover:bg-background/50 rounded flex-1 text-center font-bold text-[11px]"
+                                     >
+                                       {String.fromCharCode(65 + cIdx)}
+                                       {sortConfig?.col === cIdx && (
+                                         <ArrowUp size={10} className={`inline ml-1 transition-transform ${sortConfig.asc ? '' : 'rotate-180'}`} />
+                                       )}
+                                     </button>
+                                     <div className="relative">
+                                       <button className="p-1 hover:bg-background/50 rounded opacity-0 group-hover/header:opacity-100 transition-opacity peer">
+                                         <Filter size={10} className={filters[cIdx] ? 'text-primary' : ''} />
+                                       </button>
+                                       <div className="absolute right-0 top-full mt-1 w-32 bg-card border border-border rounded-lg shadow-xl p-2 hidden peer-focus-within:block peer-hover:block hover:block z-50">
+                                         <input 
+                                           placeholder="Filter..." 
+                                           value={filters[cIdx] || ''}
+                                           onChange={e => setFilters(prev => ({...prev, [cIdx]: e.target.value}))}
+                                           className="w-full bg-secondary text-[10px] font-bold px-2 py-1 rounded outline-none"
+                                         />
+                                       </div>
+                                     </div>
+                                  </div>
+                                </th>
                             );
                           })}
                       </tr>
                     </thead>
                     <tbody>
-                      {gridData.map((row, rIdx) => {
+                      {processedGrid.map(({row, originalIndex: rIdx}) => {
                         const activeRowUsers = activeUsers.filter(u => u.cursorRow === rIdx);
                         const hasActiveRow = activeRowUsers.length > 0;
                         const activeRowUi = hasActiveRow ? activeUsers.findIndex(u => u.userId === activeRowUsers[0].userId) : 0;
@@ -1875,7 +2028,7 @@ export default function DocumentPage() {
 
                                   {/* Strategic Progress Data Bar */}
                                   {formattingRules.filter(r => r.type === 'databar').map((rule, ridx) => {
-                                    const rawVal = evaluateFormula(cell.value, gridData);
+                                    const rawVal = evaluateFormula(cell.value, gridData, externalDocs);
                                     const val = parseFloat(rawVal);
                                     if (isNaN(val)) return null;
                                     const percentage = Math.min(100, Math.max(0, (val / (parseFloat(rule.threshold) || 100)) * 100));
@@ -1885,35 +2038,56 @@ export default function DocumentPage() {
                                     );
                                   })}
 
-                                <input
-                                  type="text"
-                                  value={activeCell?.r === rIdx && activeCell?.c === cIdx && !showHistory ? cell.value : evaluateFormula(cell.value, gridData)}
-                                  onChange={(e) => updateCell(rIdx, cIdx, e.target.value)}
-                                  readOnly={isViewer || showHistory}
-                                  style={{
-                                    fontWeight: cell.style?.bold ? '700' : '500',
-                                    fontStyle: cell.style?.italic ? 'italic' : 'normal',
-                                    color: cell.style?.color || 'inherit',
-                                    backgroundColor: cell.style?.bgColor || 'transparent',
-                                    textAlign: cell.style?.align || 'left',
-                                    // Apply Strategic Dynamic Styles
-                                    ...(() => {
-                                      const rawVal = evaluateFormula(cell.value, gridData);
-                                      const val = parseFloat(rawVal);
-                                      if (isNaN(val)) return {};
-                                      let dynamic: any = {};
-                                      formattingRules.filter(r => r.type !== 'databar').forEach(rule => {
-                                        const thresh = parseFloat(rule.threshold);
-                                        const match = rule.type === 'greater' ? val > thresh :
-                                                    rule.type === 'less' ? val < thresh :
-                                                    rule.type === 'equal' ? val === thresh : false;
-                                        if (match) dynamic = { ...dynamic, ...rule.style };
-                                      });
-                                      return dynamic;
-                                    })()
-                                  }}
-                                  className={`w-full h-full px-3 py-2 bg-transparent outline-none text-sm transition-all relative z-20 text-foreground cell-input`}
-                                />
+                                {cell.validation && !isViewer && !showHistory ? (
+                                  <div className="relative w-full h-full flex items-center justify-center">
+                                    <select
+                                      value={cell.value}
+                                      onChange={(e) => updateCell(rIdx, cIdx, e.target.value)}
+                                      className="w-full h-full px-3 py-2 outline-none text-[11px] font-black appearance-none cursor-pointer border-none z-20 relative bg-transparent text-center"
+                                      style={{
+                                        backgroundColor: cell.validation.options.find(o => o.label === cell.value)?.color ? cell.validation.options.find(o => o.label === cell.value)!.color + '30' : 'transparent',
+                                        color: cell.validation.options.find(o => o.label === cell.value)?.color || 'inherit'
+                                      }}
+                                    >
+                                      <option value="">Select Value...</option>
+                                      {cell.validation.options.map(opt => (
+                                        <option key={opt.label} value={opt.label} style={{ color: opt.color, fontWeight: 'bold' }}>{opt.label}</option>
+                                      ))}
+                                    </select>
+                                    <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none z-30" />
+                                  </div>
+                                ) : (
+                                  <input
+                                    type="text"
+                                    value={activeCell?.r === rIdx && activeCell?.c === cIdx && !showHistory && !cell.validation ? cell.value : evaluateFormula(cell.value, gridData, externalDocs)}
+                                    onChange={(e) => updateCell(rIdx, cIdx, e.target.value)}
+                                    readOnly={isViewer || showHistory || !!cell.validation}
+                                    style={{
+                                      fontWeight: cell.style?.bold ? '700' : '500',
+                                      fontStyle: cell.style?.italic ? 'italic' : 'normal',
+                                      color: cell.validation ? (cell.validation.options.find(o => o.label === cell.value)?.color || 'inherit') : (cell.style?.color || 'inherit'),
+                                      backgroundColor: cell.validation ? (cell.validation.options.find(o => o.label === cell.value)?.color ? cell.validation.options.find(o => o.label === cell.value)!.color + '30' : 'transparent') : (cell.style?.bgColor || 'transparent'),
+                                      textAlign: cell.style?.align || 'left',
+                                      // Apply Strategic Dynamic Styles
+                                      ...(() => {
+                                        if (cell.validation) return { textAlign: 'center' };
+                                        const rawVal = evaluateFormula(cell.value, gridData, externalDocs);
+                                        const val = parseFloat(rawVal);
+                                        if (isNaN(val)) return {};
+                                        let dynamic: any = {};
+                                        formattingRules.filter(r => r.type !== 'databar').forEach(rule => {
+                                          const thresh = parseFloat(rule.threshold);
+                                          const match = rule.type === 'greater' ? val > thresh :
+                                                      rule.type === 'less' ? val < thresh :
+                                                      rule.type === 'equal' ? val === thresh : false;
+                                          if (match) dynamic = { ...dynamic, ...rule.style };
+                                        });
+                                        return dynamic;
+                                      })()
+                                    }}
+                                    className={`w-full h-full px-3 py-2 bg-transparent outline-none text-sm transition-all relative z-20 text-foreground cell-input`}
+                                  />
+                                )}
                                 
                                 {cIdx === 0 && !isViewer && (
                                   <button onClick={(e) => { e.stopPropagation(); deleteRow(rIdx); }} className="absolute -left-6 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 p-1 text-muted-foreground hover:text-destructive transition-all z-40 bg-card rounded shadow-sm border border-border">
@@ -2447,6 +2621,90 @@ export default function DocumentPage() {
                          </div>
                        )}
                     </div>
+                 </div>
+              </div>
+           </div>
+        </div>
+      )}
+
+      {/* Validation Binding Modal */}
+      {showValidationModal && selection && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-6 bg-slate-900/60 backdrop-blur-md" onClick={e => e.target === e.currentTarget && setShowValidationModal(false)}>
+           <div className="bg-card w-full max-w-md shadow-2xl border border-border animate-fade-scale-in rounded-3xl overflow-hidden flex flex-col max-h-[80vh]">
+              <div className="p-6 border-b border-border bg-gradient-to-br from-amber-500/10 to-orange-500/10">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2.5 bg-amber-500 text-white rounded-xl shadow-lg shadow-amber-200 dark:shadow-none">
+                      <CheckCircle2 size={20} />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-black tracking-tight">Data Validation System</h3>
+                      <p className="text-[10px] text-muted-foreground font-bold uppercase tracking-widest mt-1">Bind Status Tags</p>
+                    </div>
+                  </div>
+                  <button onClick={() => setShowValidationModal(false)} className="p-2 hover:bg-secondary rounded-full">
+                    <X size={20} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-6 space-y-4 overflow-y-auto custom-scrollbar flex-1">
+                 <p className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">Dropdown Values for Setup</p>
+                 {validationOptions.map((opt, i) => (
+                    <div key={i} className="flex items-center gap-3">
+                       <input 
+                         type="color" 
+                         value={opt.color} 
+                         onChange={(e) => {
+                            const newOpts = [...validationOptions];
+                            newOpts[i].color = e.target.value;
+                            setValidationOptions(newOpts);
+                         }}
+                         className="w-8 h-8 p-0 border-none bg-transparent cursor-pointer rounded-lg overflow-hidden shrink-0" 
+                       />
+                       <input 
+                         value={opt.label} 
+                         onChange={(e) => {
+                            const newOpts = [...validationOptions];
+                            newOpts[i].label = e.target.value;
+                            setValidationOptions(newOpts);
+                         }}
+                         placeholder="Status label..."
+                         className="flex-1 bg-secondary border border-border font-bold text-xs px-3 py-2 rounded-lg outline-none focus:ring-2 ring-amber-500/20"
+                       />
+                       <button onClick={() => setValidationOptions(validationOptions.filter((_, idx) => idx !== i))} className="p-2 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-lg">
+                          <X size={14} />
+                       </button>
+                    </div>
+                 ))}
+                 <button 
+                   onClick={() => setValidationOptions([...validationOptions, {label: '', color: '#10b981'}])}
+                   className="w-full py-2 bg-secondary text-foreground text-xs font-bold rounded-lg border border-dashed border-border hover:border-amber-500/50 hover:bg-amber-500/5 transition-all text-center flex items-center justify-center gap-1"
+                 >
+                   <Plus size={14} /> Add Property Tag
+                 </button>
+                 
+                 <div className="pt-4 border-t border-border mt-4">
+                    <button 
+                      onClick={() => {
+                         const options = validationOptions.filter(o => o.label.trim());
+                         if (options.length === 0) return;
+                         
+                         const newGrid = [...gridData];
+                         const { start, end } = selection;
+                         for(let r = Math.min(start.r, end.r); r <= Math.max(start.r, end.r); r++) {
+                            newGrid[r] = [...newGrid[r]];
+                            for(let c = Math.min(start.c, end.c); c <= Math.max(start.c, end.c); c++) {
+                               newGrid[r][c] = { ...newGrid[r][c], validation: { options } };
+                            }
+                         }
+                         updateGrid(newGrid);
+                         setShowValidationModal(false);
+                      }}
+                      className="w-full py-3.5 bg-amber-500 text-white font-black rounded-xl shadow-lg shadow-amber-200 dark:shadow-none hover:bg-amber-600 transition-all flex items-center justify-center gap-2"
+                    >
+                      <CheckCircle2 size={16} /> Enforce Validation Range
+                    </button>
                  </div>
               </div>
            </div>
