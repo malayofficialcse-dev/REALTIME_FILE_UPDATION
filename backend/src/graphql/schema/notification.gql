@@ -3,9 +3,8 @@ type Notification {
     userId: ID!
     senderId: ID
     workspaceId: ID
-    type: String!
-    role: String
-    status: String!
+    type: String! # INVITE, TASK_ASSIGNED, MENTION, DOC_UPDATE
+    status: String! # unread, read
     message: String
     createdAt: String!
     sender: User
@@ -19,6 +18,8 @@ extend type Query {
 extend type Mutation {
     sendInvite(email: String!, workspaceId: ID!, role: String!): Notification
     respondInvite(notificationId: ID!, accept: Boolean!): Boolean
+    markAsRead(notificationId: ID!): Boolean
+    markAllAsRead: Boolean
 }
 
 extend type Subscription {

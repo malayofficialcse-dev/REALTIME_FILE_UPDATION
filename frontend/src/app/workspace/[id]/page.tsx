@@ -1,6 +1,6 @@
 'use client';
 
-import { useQuery, useMutation, gql } from '@apollo/client';
+import { useQuery, useMutation, useSubscription, gql } from '@apollo/client';
 import { useParams, useRouter } from 'next/navigation';
 import { useState, useRef, useEffect } from 'react';
 import {
@@ -8,7 +8,8 @@ import {
   PieChart as PieIcon, LineChart as LineIcon, BarChart as BarIcon, Activity,
   Filter, Clock, Layout, Sparkles, MessageSquare, X, RefreshCcw, Shield,
   ChevronRight, Zap, Star, Eye, Edit3, Trash2, Copy, Globe, Lock, CheckCircle2,
-  TrendingUp, FileSpreadsheet, AlignLeft, Settings
+  TrendingUp, FileSpreadsheet, AlignLeft, Settings, Trello, Calendar, AlertCircle,
+  Timer, History, BarChart3, ChevronDown, Bell, Check
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -39,6 +40,60 @@ const GET_WORKSPACE_DETAILS = gql`
       createdAt
       updatedAt
     }
+    getTasks(workspaceId: $id) {
+      id
+      title
+      description
+      status
+      priority
+      totalMinutesLogged
+      assignee {
+        id
+        email
+      }
+      createdAt
+      updatedAt
+    }
+    myNotifications {
+      id
+      type
+      status
+      message
+      createdAt
+      sender { email }
+    }
+  }
+`;
+
+const NOTIFICATION_SUB = gql`
+  subscription OnNotificationAdded {
+    notificationAdded {
+      id
+      type
+      message
+      status
+      createdAt
+      sender { email }
+    }
+  }
+`;
+
+const MARK_READ = gql`
+  mutation MarkAsRead($notificationId: ID!) {
+    markAsRead(notificationId: $notificationId)
+  }
+`;
+
+const GET_TIME_LOGS = gql`
+  query GetTimeLogs($workspaceId: ID!) {
+    getTimeLogs(workspaceId: $workspaceId) {
+      id
+      durationMinutes
+      description
+      logDate
+      user { email }
+      task { title }
+    }
   }
 `;
 
@@ -48,6 +103,32 @@ const CREATE_DOCUMENT = gql`
       id
       title
       type
+    }
+  }
+`;
+
+const CREATE_TASK = gql`
+  mutation CreateTask($workspaceId: ID!, $title: String!, $status: String, $priority: String, $assigneeId: ID) {
+    createTask(workspaceId: $workspaceId, title: $title, status: $status, priority: $priority, assigneeId: $assigneeId) {
+      id
+      title
+    }
+  }
+`;
+
+const UPDATE_TASK = gql`
+  mutation UpdateTask($id: ID!, $status: String, $priority: String, $title: String, $description: String) {
+    updateTask(id: $id, status: $status, priority: $priority, title: $title, description: $description) {
+      id
+      status
+    }
+  }
+`;
+
+const LOG_TIME = gql`
+  mutation LogTime($taskId: ID!, $durationMinutes: Int!, $description: String) {
+    logTime(taskId: $taskId, durationMinutes: $durationMinutes, description: $description) {
+      id
     }
   }
 `;
@@ -65,56 +146,35 @@ const GET_WORKSPACE_ANALYTICS = gql`
   }
 `;
 
-function DocCardSkeleton() {
-  return (
-    <div className="premium-card p-6 min-h-[220px] flex flex-col justify-between animate-pulse">
-      <div>
-        <div className="flex justify-between mb-5">
-          <div className="skeleton w-14 h-14 rounded-xl" />
-          <div className="skeleton w-6 h-6 rounded" />
-        </div>
-        <div className="skeleton w-4/5 h-6 rounded mb-2" />
-        <div className="skeleton w-2/3 h-4 rounded" />
-      </div>
-      <div className="flex items-center justify-between pt-4 border-t border-border">
-        <div className="skeleton w-24 h-4 rounded" />
-        <div className="skeleton w-16 h-4 rounded" />
-      </div>
-    </div>
-  );
-}
-
-function MemberRoleBadge({ role }: { role: string }) {
-  const config: Record<string, { label: string; className: string }> = {
-    admin: { label: 'Admin', className: 'bg-purple-50 text-purple-600 border border-purple-200 dark:bg-purple-900/20 dark:text-purple-400 dark:border-purple-800' },
-    editor: { label: 'Editor', className: 'bg-blue-50 text-blue-600 border border-blue-200 dark:bg-blue-900/20 dark:text-blue-400 dark:border-blue-800' },
-    viewer: { label: 'Viewer', className: 'bg-slate-50 text-slate-600 border border-slate-200 dark:bg-slate-900/20 dark:text-slate-400 dark:border-slate-800' },
-  };
-  const c = config[role] || config.viewer;
-  return (
-    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 ${c.className}`}>
-      {c.label}
-    </span>
-  );
-}
-
 export default function WorkspacePage() {
   const { id } = useParams();
   const router = useRouter();
   const [showPicker, setShowPicker] = useState(false);
-  const [activeView, setActiveView] = useState<'hub' | 'analytics' | 'members'>('hub');
+  const [activeView, setActiveView] = useState<'hub' | 'board' | 'timesheets' | 'analytics' | 'members'>('hub');
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'text' | 'sheet'>('all');
+  const [showNotifications, setShowNotifications] = useState(false);
 
-  // Create doc modal
+  // Modal states
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [createType, setCreateType] = useState<'text' | 'sheet'>('text');
+  const [createType, setCreateType] = useState<'text' | 'sheet' | 'task' | 'log'>('text');
   const [createTitle, setCreateTitle] = useState('');
+  const [logTask, setLogTask] = useState<string | null>(null);
+  const [logDuration, setLogDuration] = useState('60');
+  const [logDesc, setLogDesc] = useState('');
   const [creating, setCreating] = useState(false);
   const createInputRef = useRef<HTMLInputElement>(null);
 
+  // Notifications state for Toasts
+  const [toasts, setToasts] = useState<any[]>([]);
+
   const { data, loading, refetch } = useQuery(GET_WORKSPACE_DETAILS, {
     variables: { id }
+  });
+
+  const { data: logsData, loading: logsLoading, refetch: refetchLogs } = useQuery(GET_TIME_LOGS, {
+    variables: { workspaceId: id },
+    skip: activeView !== 'timesheets'
   });
 
   const { data: analData, loading: analLoading } = useQuery(GET_WORKSPACE_ANALYTICS, {
@@ -123,6 +183,24 @@ export default function WorkspacePage() {
   });
 
   const [createDocument] = useMutation(CREATE_DOCUMENT);
+  const [createTask] = useMutation(CREATE_TASK);
+  const [updateTaskMutation] = useMutation(UPDATE_TASK);
+  const [logTimeMutation] = useMutation(LOG_TIME);
+  const [markRead] = useMutation(MARK_READ);
+
+  // Real-time Notifications Subscription
+  useSubscription(NOTIFICATION_SUB, {
+    onData: ({ data: subData }) => {
+      const newNotif = subData.data?.notificationAdded;
+      if (newNotif) {
+        setToasts(prev => [...prev, newNotif]);
+        refetch(); // Refresh list
+        setTimeout(() => {
+          setToasts(prev => prev.filter(t => t.id !== newNotif.id));
+        }, 5000);
+      }
+    }
+  });
 
   useEffect(() => {
     if (showCreateModal) setTimeout(() => createInputRef.current?.focus(), 100);
@@ -131,30 +209,67 @@ export default function WorkspacePage() {
   const role = data?.workspace?.currentUserRole;
   const isViewer = role === 'viewer';
   const isAdmin = role === 'admin';
+  const notifications = data?.myNotifications || [];
+  const unreadCount = notifications.filter((n: any) => n.status === 'unread').length;
 
-  const handleOpenCreate = (type: 'text' | 'sheet') => {
+  const handleMarkRead = async (nid: string) => {
+    await markRead({ variables: { notificationId: nid } });
+    refetch();
+  };
+
+  const handleOpenCreate = (type: 'text' | 'sheet' | 'task') => {
     setCreateType(type);
     setCreateTitle('');
     setShowCreateModal(true);
     setShowPicker(false);
   };
 
+  const handleOpenLog = (taskId: string) => {
+    setLogTask(taskId);
+    setCreateType('log');
+    setShowCreateModal(true);
+  };
+
   const handleCreateSubmit = async () => {
-    if (!createTitle.trim()) return;
     setCreating(true);
     try {
-      await createDocument({ variables: { title: createTitle.trim(), workspaceId: id, type: createType } });
+      if (createType === 'log') {
+        if (!logTask) return;
+        await logTimeMutation({ variables: { taskId: logTask, durationMinutes: parseInt(logDuration), description: logDesc } });
+        refetch();
+        refetchLogs();
+      } else {
+        if (!createTitle.trim()) return;
+        if (createType === 'task') {
+          await createTask({ variables: { title: createTitle.trim(), workspaceId: id, status: 'TODO' } });
+        } else {
+          await createDocument({ variables: { title: createTitle.trim(), workspaceId: id, type: createType } });
+        }
+      }
       setShowCreateModal(false);
       setCreateTitle('');
+      setLogDesc('');
       refetch();
     } catch (err) {
-      alert('Error creating document');
+      alert('Error processing request');
     } finally {
       setCreating(false);
     }
   };
 
+  const handleDragUpdate = async (taskId: string, newStatus: string) => {
+    try {
+      await updateTaskMutation({ variables: { id: taskId, status: newStatus } });
+      refetch();
+    } catch (err) {
+      console.error('Board Update Error:', err);
+    }
+  };
+
   const docs = data?.documents || [];
+  const tasks = data?.getTasks || [];
+  const logs = logsData?.getTimeLogs || [];
+  
   const filteredDocs = docs.filter((d: any) => {
     const matchType = filterType === 'all' || d.type === filterType;
     const matchSearch = d.title.toLowerCase().includes(searchQuery.toLowerCase());
@@ -165,9 +280,18 @@ export default function WorkspacePage() {
 
   const viewTabs = [
     { id: 'hub', label: 'Assets', icon: LayoutGrid },
+    { id: 'board', label: 'Board', icon: Trello },
+    { id: 'timesheets', label: 'Timesheets', icon: Timer },
     { id: 'analytics', label: 'Analytics', icon: Activity },
     { id: 'members', label: 'Team', icon: Users },
   ] as const;
+
+  const kanbanColumns = [
+    { id: 'TODO', label: 'To Do', color: 'bg-slate-500' },
+    { id: 'IN_PROGRESS', label: 'In Progress', color: 'bg-blue-500' },
+    { id: 'REVIEW', label: 'Review', color: 'bg-purple-500' },
+    { id: 'DONE', label: 'Done', color: 'bg-emerald-500' },
+  ];
 
   const getDocPreview = (doc: any) => {
     if (doc.type !== 'text' || !doc.content) return null;
@@ -187,99 +311,126 @@ export default function WorkspacePage() {
     return d.toLocaleDateString();
   };
 
+  const formatMinutes = (m: number) => {
+     if (m < 60) return `${m}m`;
+     const h = Math.floor(m / 60);
+     const rem = m % 60;
+     return rem > 0 ? `${h}h ${rem}m` : `${h}h`;
+  };
+
   if (loading) return (
     <div className="min-h-screen bg-background flex items-center justify-center">
-      <div className="flex flex-col items-center gap-4">
-        <div className="w-12 h-12 border-4 border-primary border-t-transparent animate-spin" style={{ borderRadius: '50%' }} />
-        <p className="text-sm font-semibold text-muted-foreground">Loading workspace...</p>
-      </div>
+      <div className="flex flex-col items-center gap-4"><div className="w-12 h-12 border-4 border-primary border-t-transparent animate-spin" style={{ borderRadius: '50%' }} /><p className="text-sm font-semibold text-muted-foreground">Loading workspace...</p></div>
     </div>
   );
 
   return (
     <div className="min-h-screen mesh-bg text-foreground">
-      {/* Orb decorations */}
-      <div className="fixed top-0 right-0 w-[500px] h-[500px] orb-1 pointer-events-none translate-x-1/2 -translate-y-1/2 z-0" />
+      {/* Real-time Toasts */}
+      <div className="fixed top-24 right-8 z-[200] space-y-3 pointer-events-none">
+         {toasts.map(toast => (
+           <div key={toast.id} className="bg-white dark:bg-slate-900 border-l-4 border-primary shadow-[0_20px_60px_rgba(0,0,0,0.15)] p-5 w-80 animate-slide-in pointer-events-auto flex items-start gap-4 ring-1 ring-border">
+              <div className="p-2 bg-primary/10 text-primary">
+                 <Bell size={18} />
+              </div>
+              <div className="flex-1">
+                 <h4 className="text-xs font-black uppercase tracking-widest text-primary mb-1">{toast.type.replace('_', ' ')}</h4>
+                 <p className="text-sm font-bold text-foreground leading-tight">{toast.message}</p>
+                 <span className="text-[10px] text-muted-foreground mt-2 block font-medium">Just Now</span>
+              </div>
+              <button 
+                onClick={() => setToasts(t => t.filter(x => x.id !== toast.id))}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X size={14} />
+              </button>
+           </div>
+         ))}
+      </div>
 
       {/* Header */}
       <header className="glass-header px-6 lg:px-10 py-3.5 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-5">
-            <button
-              onClick={() => router.push('/dashboard')}
-              className="p-2.5 hover:bg-secondary text-muted-foreground transition-all border border-transparent hover:border-border"
-            >
-              <ArrowLeft size={18} />
-            </button>
+            <button onClick={() => router.push('/dashboard')} className="p-2.5 hover:bg-secondary text-muted-foreground transition-all border border-transparent hover:border-border"><ArrowLeft size={18} /></button>
             <div>
               <div className="flex items-center gap-3">
-                <h1 className="text-2xl font-black tracking-tight gradient-text">
-                  {data?.workspace?.name}
-                </h1>
+                <h1 className="text-2xl font-black tracking-tight gradient-text">{data?.workspace?.name}</h1>
                 <MemberRoleBadge role={role || 'viewer'} />
               </div>
               <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mt-0.5 flex items-center gap-2">
                 <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse inline-block" />
-                {docs.length} asset{docs.length !== 1 ? 's' : ''} · {members.length} member{members.length !== 1 ? 's' : ''}
+                {docs.length} assets · {tasks.length} tasks · {members.length} team
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            {/* View Tabs */}
+          <div className="flex items-center gap-6">
             <div className="hidden sm:flex bg-secondary p-1 border border-border gap-0.5">
               {viewTabs.map(tab => (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveView(tab.id)}
-                  className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold transition-all ${
-                    activeView === tab.id
-                      ? 'bg-card shadow-sm text-primary'
-                      : 'text-muted-foreground hover:text-foreground'
-                  }`}
-                >
-                  <tab.icon size={14} />
-                  {tab.label}
-                </button>
+                <button key={tab.id} onClick={() => setActiveView(tab.id)} className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold transition-all ${activeView === tab.id ? 'bg-card shadow-sm text-primary' : 'text-muted-foreground hover:text-foreground'}`}><tab.icon size={14} />{tab.label}</button>
               ))}
+            </div>
+
+            {/* Notification Bell */}
+            <div className="relative">
+               <button 
+                 onClick={() => setShowNotifications(!showNotifications)}
+                 className={`p-2.5 transition-all text-muted-foreground hover:text-primary relative ${showNotifications ? 'bg-secondary' : ''}`}
+               >
+                 <Bell size={20} />
+                 {unreadCount > 0 && (
+                   <span className="absolute top-1.5 right-1.5 w-4 h-4 bg-primary text-white text-[9px] font-black rounded-full flex items-center justify-center border-2 border-white shadow-sm animate-pulse-subtle">
+                      {unreadCount}
+                   </span>
+                 )}
+               </button>
+
+               {showNotifications && (
+                 <div className="absolute right-0 mt-3 w-96 bg-card border border-border shadow-2xl z-[100] animate-fade-scale-in">
+                    <div className="p-5 border-b border-border flex items-center justify-between">
+                       <h3 className="text-sm font-black uppercase tracking-widest text-foreground">Activity Stream</h3>
+                       <button onClick={async () => { /* Mark all Read */ }} className="text-[10px] font-black uppercase tracking-widest text-primary hover:underline">Mark all read</button>
+                    </div>
+                    <div className="max-h-[400px] overflow-y-auto custom-scrollbar">
+                       {notifications.map((n: any) => (
+                         <div key={n.id} className={`p-5 flex gap-4 hover:bg-secondary/30 transition-all border-b border-border last:border-0 relative ${n.status === 'unread' ? 'bg-primary/3' : ''}`}>
+                            <div className={`w-10 h-10 shrink-0 flex items-center justify-center bg-card border border-border shadow-sm`}>
+                               {n.type === 'TASK_ASSIGNED' ? <Zap size={18} className="text-indigo-500" /> : <Shield size={18} className="text-blue-500" />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                               <p className="text-xs font-bold text-foreground leading-snug">{n.message}</p>
+                               <span className="text-[10px] font-medium text-muted-foreground mt-2 block">{formatDate(n.createdAt)}</span>
+                            </div>
+                            {n.status === 'unread' && (
+                               <button onClick={() => handleMarkRead(n.id)} className="w-6 h-6 rounded-full bg-emerald-500/10 text-emerald-500 flex items-center justify-center hover:bg-emerald-500 hover:text-white transition-all">
+                                  <Check size={12} />
+                               </button>
+                            )}
+                         </div>
+                       ))}
+                       {notifications.length === 0 && (
+                          <div className="py-12 text-center text-muted-foreground py-10">
+                             <Bell size={24} className="mx-auto opacity-10 mb-3" />
+                             <p className="text-[10px] font-black uppercase tracking-widest">System Silent</p>
+                          </div>
+                       )}
+                    </div>
+                    <div className="p-4 bg-secondary/30 border-t border-border text-center">
+                       <Link href="/notifications" className="text-[10px] font-black uppercase tracking-widest text-primary hover:underline">View All Alerts</Link>
+                    </div>
+                 </div>
+               )}
             </div>
 
             {!isViewer && (
               <div className="relative">
-                <button
-                  onClick={() => setShowPicker(!showPicker)}
-                  className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-bold hover:opacity-90 transition-all shadow-lg shadow-indigo-200 dark:shadow-indigo-900/30 text-sm"
-                >
-                  <Plus size={16} className="stroke-[3]" />
-                  Add Asset
-                </button>
-
+                <button onClick={() => setShowPicker(!showPicker)} className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-bold hover:opacity-90 transition-all shadow-lg shadow-indigo-200 dark:shadow-indigo-900/30 text-sm"><Plus size={16} className="stroke-[3]" />Add Asset</button>
                 {showPicker && (
                   <div className="absolute right-0 mt-2 w-60 bg-card border border-border shadow-2xl p-2 z-[60] animate-fade-scale-in">
-                    <button
-                      onClick={() => handleOpenCreate('text')}
-                      className="w-full flex items-center gap-4 p-3.5 hover:bg-secondary text-left transition-all group"
-                    >
-                      <div className="p-2.5 bg-blue-50 dark:bg-blue-900/20 group-hover:bg-blue-500 text-blue-500 group-hover:text-white transition-all">
-                        <FileText size={18} />
-                      </div>
-                      <div>
-                        <span className="text-sm font-bold text-foreground block">Document</span>
-                        <span className="text-[10px] text-muted-foreground font-semibold">Collaborative writing</span>
-                      </div>
-                    </button>
-                    <button
-                      onClick={() => handleOpenCreate('sheet')}
-                      className="w-full flex items-center gap-4 p-3.5 hover:bg-secondary text-left transition-all group mt-1"
-                    >
-                      <div className="p-2.5 bg-emerald-50 dark:bg-emerald-900/20 group-hover:bg-emerald-500 text-emerald-500 group-hover:text-white transition-all">
-                        <Table size={18} />
-                      </div>
-                      <div>
-                        <span className="text-sm font-bold text-foreground block">Spreadsheet</span>
-                        <span className="text-[10px] text-muted-foreground font-semibold">Data & finance</span>
-                      </div>
-                    </button>
+                    <button onClick={() => handleOpenCreate('task')} className="w-full flex items-center gap-4 p-3.5 hover:bg-secondary text-left transition-all group"><div className="p-2.5 bg-purple-50 dark:bg-purple-900/20 group-hover:bg-purple-500 text-purple-500 group-hover:text-white transition-all"><Trello size={18} /></div><div><span className="text-sm font-bold text-foreground block">Task Item</span><span className="text-[10px] text-muted-foreground font-semibold">Workflow tracking</span></div></button>
+                    <button onClick={() => handleOpenCreate('text')} className="w-full flex items-center gap-4 p-3.5 hover:bg-secondary text-left transition-all group mt-1"><div className="p-2.5 bg-blue-50 dark:bg-blue-900/20 group-hover:bg-blue-500 text-blue-500 group-hover:text-white transition-all"><FileText size={18} /></div><div><span className="text-sm font-bold text-foreground block">Document</span><span className="text-[10px] text-muted-foreground font-semibold">Collaborative writing</span></div></button>
+                    <button onClick={() => handleOpenCreate('sheet')} className="w-full flex items-center gap-4 p-3.5 hover:bg-secondary text-left transition-all group mt-1"><div className="p-2.5 bg-emerald-50 dark:bg-emerald-900/20 group-hover:bg-emerald-500 text-emerald-500 group-hover:text-white transition-all"><Table size={18} /></div><div><span className="text-sm font-bold text-foreground block">Spreadsheet</span><span className="text-[10px] text-muted-foreground font-semibold">Data & finance</span></div></button>
                   </div>
                 )}
               </div>
@@ -288,450 +439,91 @@ export default function WorkspacePage() {
         </div>
       </header>
 
-      {/* ── HUB VIEW ── */}
+      {/* HUB VIEW */}
       {activeView === 'hub' && (
         <main className="max-w-7xl mx-auto px-6 lg:px-10 py-10 relative z-10">
-          {/* Search + Filter bar */}
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 mb-8">
-            <div className="relative flex-1 max-w-md">
-              <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <input
-                type="text"
-                placeholder="Search assets..."
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                className="w-full pl-11 pr-4 py-3 bg-card border border-border focus:ring-2 focus:ring-primary/15 focus:border-primary outline-none text-sm font-medium transition-all"
-              />
-            </div>
-
-            <div className="flex items-center gap-2">
-              {(['all', 'text', 'sheet'] as const).map(type => (
-                <button
-                  key={type}
-                  onClick={() => setFilterType(type)}
-                  className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-all border ${
-                    filterType === type
-                      ? 'bg-primary text-white border-primary shadow-sm'
-                      : 'bg-card border-border text-muted-foreground hover:border-primary hover:text-primary'
-                  }`}
-                >
-                  {type === 'all' ? 'All' : type === 'text' ? 'Docs' : 'Sheets'}
-                </button>
-              ))}
-            </div>
-
-            {isViewer && (
-              <div className="flex items-center gap-2 px-4 py-2.5 bg-amber-50 dark:bg-amber-900/15 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800 text-xs font-bold">
-                <Eye size={14} /> Read Only
-              </div>
-            )}
+            <div className="relative flex-1 max-w-md"><Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" /><input type="text" placeholder="Search assets..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} className="w-full pl-11 pr-4 py-3 bg-card border border-border focus:ring-2 focus:ring-primary/15 focus:border-primary outline-none text-sm font-medium transition-all" /></div>
+            <div className="flex items-center gap-2">{(['all', 'text', 'sheet'] as const).map(type => <button key={type} onClick={() => setFilterType(type)} className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-all border ${filterType === type ? 'bg-primary text-white border-primary shadow-sm' : 'bg-card border-border text-muted-foreground hover:border-primary hover:text-primary'}`}>{type === 'all' ? 'All' : type === 'text' ? 'Docs' : 'Sheets'}</button>)}</div>
           </div>
-
-          {/* Doc Grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
             {filteredDocs.map((doc: any, idx: number) => {
               const preview = getDocPreview(doc);
               const isSheet = doc.type === 'sheet';
-
               return (
-                <Link
-                  key={doc.id}
-                  href={`/document/${doc.id}?w=${id}`}
-                  className="premium-card p-6 flex flex-col justify-between min-h-[220px] relative overflow-hidden group animate-slide-up"
-                  style={{ animationDelay: `${idx * 60}ms` }}
-                >
-                  {/* Top accent bar */}
+                <Link key={doc.id} href={`/document/${doc.id}?w=${id}`} className="premium-card p-6 flex flex-col justify-between min-h-[220px] relative overflow-hidden group animate-slide-up" style={{ animationDelay: `${idx * 60}ms` }}>
                   <div className={`absolute top-0 left-0 right-0 h-0.5 ${isSheet ? 'bg-emerald-500' : 'bg-blue-500'} group-hover:h-1 transition-all duration-300`} />
-
-                  <div>
-                    <div className="flex justify-between items-start mb-4">
-                      <div className={`p-3 transition-all duration-300 ${
-                        isSheet
-                          ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 group-hover:bg-emerald-500 group-hover:text-white'
-                          : 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 group-hover:bg-blue-500 group-hover:text-white'
-                      }`}>
-                        {isSheet ? <Table size={24} /> : <FileText size={24} />}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 ${
-                          isSheet
-                            ? 'bg-emerald-50 text-emerald-600 border border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-400 dark:border-emerald-800'
-                            : 'bg-blue-50 text-blue-600 border border-blue-200 dark:bg-blue-900/20 dark:text-blue-400 dark:border-blue-800'
-                        }`}>
-                          {isSheet ? 'Sheet' : 'Doc'}
-                        </div>
-                      </div>
-                    </div>
-
-                    <h3 className="text-lg font-black text-foreground tracking-tight group-hover:translate-x-1 transition-transform duration-300 line-clamp-2">
-                      {doc.title}
-                    </h3>
-
-                    {preview && (
-                      <p className="text-xs text-muted-foreground mt-2 line-clamp-2 leading-relaxed font-medium">
-                        {preview}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="flex items-center justify-between mt-4 pt-4 border-t border-border">
-                    <div className="flex items-center gap-1.5 text-[10px] font-semibold text-muted-foreground">
-                      <Clock size={11} />
-                      {formatDate(doc.updatedAt)}
-                    </div>
-                    <div className={`opacity-0 group-hover:opacity-100 transition-all duration-300 text-xs font-bold flex items-center gap-1 ${isSheet ? 'text-emerald-500' : 'text-blue-500'}`}>
-                      Open <ChevronRight size={12} />
-                    </div>
-                  </div>
-
-                  {/* Background glow */}
-                  <div className={`absolute -right-8 -bottom-8 w-32 h-32 opacity-0 group-hover:opacity-100 blur-2xl transition-all duration-700 ${isSheet ? 'bg-emerald-500/10' : 'bg-blue-500/10'}`} style={{ borderRadius: '50% !important' }} />
+                  <div><div className="flex justify-between items-start mb-4"><div className={`p-3 transition-all duration-300 ${isSheet ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 group-hover:bg-emerald-500 group-hover:text-white' : 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 group-hover:bg-blue-500 group-hover:text-white'}`}>{isSheet ? <Table size={24} /> : <FileText size={24} />}</div><div className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 bg-secondary border border-border">{isSheet ? 'Sheet' : 'Doc'}</div></div><h3 className="text-lg font-black text-foreground tracking-tight group-hover:translate-x-1 transition-transform duration-300 line-clamp-2">{doc.title}</h3>{preview && <p className="text-xs text-muted-foreground mt-2 line-clamp-2 leading-relaxed font-medium">{preview}</p>}</div>
+                  <div className="flex items-center justify-between mt-4 pt-4 border-t border-border"><div className="flex items-center gap-1.5 text-[10px] font-semibold text-muted-foreground"><Clock size={11} /> {formatDate(doc.updatedAt)}</div><div className="opacity-0 group-hover:opacity-100 transition-all duration-300 text-xs font-bold flex items-center gap-1 text-primary">Open <ChevronRight size={12} /></div></div>
                 </Link>
               );
             })}
-
-            {filteredDocs.length === 0 && !loading && (
-              <div className="col-span-full py-28 text-center border-2 border-dashed border-border flex flex-col items-center animate-fade-scale-in">
-                <div className="w-20 h-20 bg-secondary text-muted-foreground flex items-center justify-center mb-6 animate-float">
-                  {searchQuery ? <Search size={36} /> : <Layout size={36} />}
-                </div>
-                <h3 className="text-xl font-black text-foreground">
-                  {searchQuery ? 'No assets match your search' : 'Workspace is Empty'}
-                </h3>
-                <p className="text-sm text-muted-foreground mt-2 max-w-sm">
-                  {searchQuery
-                    ? `No results for "${searchQuery}".`
-                    : 'Create your first document or spreadsheet to begin collaborating.'
-                  }
-                </p>
-                {!isViewer && !searchQuery && (
-                  <button
-                    onClick={() => setShowPicker(true)}
-                    className="mt-8 px-6 py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-bold hover:opacity-90 transition-all flex items-center gap-2"
-                  >
-                    <Plus size={16} className="stroke-[3]" /> Create Asset
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* Trailing "add" card */}
-            {!isViewer && !searchQuery && filteredDocs.length > 0 && (
-              <button
-                onClick={() => setShowPicker(true)}
-                className="group border-2 border-dashed border-border hover:border-primary p-6 min-h-[220px] flex flex-col items-center justify-center gap-3 transition-all hover:bg-primary/3"
-              >
-                <div className="w-12 h-12 bg-secondary group-hover:bg-primary/10 flex items-center justify-center transition-all">
-                  <Plus size={24} className="text-muted-foreground group-hover:text-primary stroke-2 transition-colors group-hover:rotate-90 duration-300" />
-                </div>
-                <p className="text-sm font-bold text-muted-foreground group-hover:text-primary transition-colors">Add Asset</p>
-              </button>
-            )}
           </div>
         </main>
       )}
 
-      {/* ── ANALYTICS VIEW ── */}
+      {/* BOARD VIEW */}
+      {activeView === 'board' && (
+        <main className="max-w-[100vw] px-6 lg:px-10 py-10 overflow-x-auto custom-scrollbar relative z-10">
+          <div className="flex gap-6 min-w-[1000px] h-[calc(100vh-220px)]">
+            {kanbanColumns.map(column => {
+              const columnTasks = tasks.filter((t: any) => t.status === column.id);
+              return (
+                <div key={column.id} className="flex-1 flex flex-col min-w-[280px] bg-secondary/50 border border-border p-4 rounded-xl">
+                  <div className="flex items-center justify-between mb-4 px-2"><div className="flex items-center gap-2"><div className={`w-2 h-2 rounded-full ${column.color}`} /><h3 className="text-sm font-black uppercase tracking-widest text-foreground">{column.label}</h3><span className="text-[10px] font-bold text-muted-foreground px-2 py-0.5 bg-card border border-border rounded-full">{columnTasks.length}</span></div>{!isViewer && <button onClick={() => { handleOpenCreate('task'); setCreateTitle(''); }} className="p-1 hover:bg-card text-muted-foreground hover:text-primary transition-colors"><Plus size={16} /></button>}</div>
+                  <div className="flex-1 space-y-3 overflow-y-auto no-scrollbar pb-10">
+                    {columnTasks.map((task: any) => (
+                      <div key={task.id} className="premium-card p-4 hover:border-primary group cursor-grab transition-all hover:translate-y-[-2px] hover:shadow-xl shadow-sm bg-card">
+                        <div className="flex items-start justify-between gap-3 mb-2"><h4 className="text-sm font-bold text-foreground leading-tight group-hover:text-primary transition-colors">{task.title}</h4><div className={`mt-1 shrink-0 px-2 py-0.5 text-[9px] font-black uppercase tracking-tighter border ${task.priority === 'HIGH' || task.priority === 'CRITICAL' ? 'bg-rose-50 text-rose-600 border-rose-200' : task.priority === 'MEDIUM' ? 'bg-amber-50 text-amber-600 border-amber-200' : 'bg-slate-50 text-slate-600 border-slate-200'}`}>{task.priority}</div></div>
+                        <div className="flex items-center gap-2 text-[10px] font-bold text-muted-foreground mb-4"><Timer size={12} className={task.totalMinutesLogged > 0 ? "text-emerald-500" : ""} /><span className={task.totalMinutesLogged > 0 ? "text-foreground" : "opacity-50"}>{task.totalMinutesLogged > 0 ? formatMinutes(task.totalMinutesLogged) : '0h'} tracked</span></div>
+                        <div className="flex items-center justify-between"><div className="flex items-center gap-3">{task.assignee ? <div className="w-6 h-6 rounded-full bg-primary flex items-center justify-center text-[8px] font-black text-white shadow-sm">{task.assignee.email[0].toUpperCase()}</div> : <div className="w-6 h-6 rounded-full border border-dashed border-border flex items-center justify-center text-muted-foreground"><Users size={10} /></div>}</div>{!isViewer && <button onClick={() => handleOpenLog(task.id)} className="p-1.5 bg-secondary text-primary hover:bg-primary hover:text-white transition-all rounded-[3px] flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest"><Plus size={10} /> Log Time</button>}</div>
+                        {!isViewer && <div className="mt-4 pt-4 border-t border-border flex items-center justify-between gap-1 opacity-0 group-hover:opacity-100 transition-opacity"><div className="flex gap-1">{kanbanColumns.filter(c => c.id !== column.id).map(target => <button key={target.id} onClick={() => handleDragUpdate(task.id, target.id)} className="p-1 text-[8px] font-black uppercase border border-border hover:border-primary transition-all hover:bg-primary/10">{target.label.split(' ')[0]}</button>)}</div></div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </main>
+      )}
+
+      {/* TIMESHEETS VIEW */}
+      {activeView === 'timesheets' && (
+        <main className="max-w-7xl mx-auto px-6 lg:px-10 py-10 animate-fade-scale-in relative z-10">
+          <div className="bg-card border border-border relative overflow-hidden"><div className="p-8 border-b border-border flex items-center justify-between"><div><h2 className="text-3xl font-black gradient-text">Resource Ledger</h2><p className="text-xs font-bold text-muted-foreground uppercase tracking-widest mt-1">Audit trail of workspace execution hours</p></div><button onClick={() => refetchLogs()} className="p-2.5 bg-secondary hover:bg-primary hover:text-white transition-all border border-border"><RefreshCcw size={18} /></button></div>
+             <div className="overflow-x-auto"><table className="w-full text-left border-collapse"><thead><tr className="bg-secondary/50 border-b border-border"><th className="p-5 text-[10px] font-black uppercase tracking-widest text-muted-foreground">Team Member</th><th className="p-5 text-[10px] font-black uppercase tracking-widest text-muted-foreground">Task Item</th><th className="p-5 text-[10px] font-black uppercase tracking-widest text-muted-foreground">Duration</th><th className="p-5 text-[10px] font-black uppercase tracking-widest text-muted-foreground">Statement</th><th className="p-5 text-[10px] font-black uppercase tracking-widest text-muted-foreground">Execution Date</th></tr></thead><tbody>{logs.map((log: any) => (<tr key={log.id} className="border-b border-border hover:bg-secondary/20 transition-colors"><td className="p-5 flex items-center gap-3"><div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-[10px] text-white font-black">{log.user.email[0].toUpperCase()}</div><span className="text-sm font-bold text-foreground">{log.user.email.split('@')[0]}</span></td><td className="p-5"><span className="text-xs font-black uppercase tracking-tighter text-muted-foreground truncate max-w-[200px] inline-block">{log.task.title}</span></td><td className="p-5"><div className="flex items-center gap-2"><Timer size={14} className="text-primary" /><span className="text-sm font-black text-foreground">{formatMinutes(log.durationMinutes)}</span></div></td><td className="p-5"><p className="text-xs text-muted-foreground font-medium italic truncate max-w-[250px]">{log.description || "System automatic log"}</p></td><td className="p-5"><span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">{new Date(log.logDate).toLocaleDateString()}</span></td></tr>))}</tbody></table>{logs.length === 0 && !logsLoading && <div className="py-20 text-center flex flex-col items-center gap-4"><Timer size={48} className="text-muted-foreground opacity-20" /><p className="text-sm font-bold text-muted-foreground uppercase tracking-widest">No hours logged in this workspace yet.</p></div>}</div>
+          </div>
+        </main>
+      )}
+
+      {/* ANALYTICS VIEW */}
       {activeView === 'analytics' && (
         <main className="max-w-7xl mx-auto px-6 lg:px-10 py-10 animate-fade-scale-in relative z-10">
-          <div className="flex items-center justify-between mb-10">
-            <div>
-              <h2 className="text-3xl font-black tracking-tight gradient-text">Intelligence Deck</h2>
-              <p className="text-xs font-bold text-muted-foreground uppercase tracking-[0.2em] mt-1">Real-time Workspace Metadata Analysis</p>
-            </div>
-            <div className="flex items-center gap-3">
-              <select className="bg-card border border-border px-4 py-2.5 text-xs font-bold uppercase tracking-widest outline-none transition-all text-foreground">
-                <option>Last 7 Days</option>
-                <option>Last 30 Days</option>
-              </select>
-            </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              <div className="premium-card p-7"><h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground mb-6 flex items-center gap-2"><PieIcon size={14} className="text-primary" /> Asset Distribution</h3><div className="h-56"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={analData?.workspaceAnalytics?.assetDistribution || []} cx="50%" cy="50%" innerRadius={55} outerRadius={80} paddingAngle={6} dataKey="value" nameKey="label">{(analData?.workspaceAnalytics?.assetDistribution || []).map((entry: any, i: number) => <Cell key={i} fill={entry.color} />)}</Pie><Tooltip /></PieChart></ResponsiveContainer></div></div>
+              <div className="premium-card p-7"><h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground mb-6 flex items-center gap-2"><BarChart3 size={14} className="text-emerald-500" /> Resource Expenditure</h3><div className="h-56 flex flex-col justify-center"><div className="space-y-4">{kanbanColumns.map(col => { const mins = tasks.filter((t: any) => t.status === col.id).reduce((acc: number, t: any) => acc + (t.totalMinutesLogged || 0), 0); const totalMins = tasks.reduce((acc: number, t: any) => acc + (t.totalMinutesLogged || 0), 0); const percentage = totalMins > 0 ? (mins / totalMins) * 100 : 0; return ( <div key={col.id}><div className="flex justify-between items-center mb-1.5 px-1"><span className="text-[10px] font-black uppercase tracking-widest text-foreground">{col.label}</span><span className="text-[10px] font-black text-muted-foreground">{formatMinutes(mins)}</span></div><div className="h-2 bg-secondary overflow-hidden"><div className={`h-full transition-all duration-1000 ${col.color}`} style={{ width: `${percentage}%` }} /></div></div> ) })}</div></div></div>
+              <div className="premium-card p-7"><h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground mb-6 flex items-center gap-2"><TrendingUp size={14} className="text-emerald-500" /> Productivity Velocity</h3><div className="h-56"><ResponsiveContainer width="100%" height="100%"><AreaChart data={analData?.workspaceAnalytics?.productivityTrend || []}><Area type="monotone" dataKey="value" stroke="hsl(var(--primary))" fillOpacity={0.2} fill="hsl(var(--primary))" /></AreaChart></ResponsiveContainer></div></div>
           </div>
-
-          {analLoading ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {[1, 2, 3, 4, 5, 6].map(i => (
-                <div key={i} className="premium-card p-8 h-80 animate-pulse">
-                  <div className="skeleton h-4 w-40 mb-6 rounded" />
-                  <div className="skeleton h-full w-full rounded-lg" />
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-
-              {/* Asset Distribution Pie */}
-              <div className="premium-card p-7 relative overflow-hidden">
-                <div className="absolute top-0 right-0 w-32 h-32 orb-1 -mr-16 -mt-16" />
-                <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground mb-6 flex items-center gap-2">
-                  <PieIcon size={14} className="text-primary" /> Asset Distribution
-                </h3>
-                <div className="h-56">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={analData?.workspaceAnalytics?.assetDistribution || []}
-                        cx="50%" cy="50%"
-                        innerRadius={55} outerRadius={80}
-                        paddingAngle={6} dataKey="value" nameKey="label"
-                        animationBegin={0} animationDuration={1200}
-                      >
-                        {(analData?.workspaceAnalytics?.assetDistribution || []).map((entry: any, i: number) => (
-                          <Cell key={i} fill={entry.color} className="hover:opacity-80 transition-opacity cursor-pointer" />
-                        ))}
-                      </Pie>
-                      <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold' }} />
-                      <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold' }} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Team Radar */}
-              <div className="premium-card p-7">
-                <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground mb-6 flex items-center gap-2">
-                  <Users size={14} className="text-primary" /> Team Engagement
-                </h3>
-                <div className="h-56">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <RadarChart cx="50%" cy="50%" outerRadius="75%" data={analData?.workspaceAnalytics?.memberEngagement || []}>
-                      <PolarGrid stroke="hsl(var(--border))" />
-                      <PolarAngleAxis dataKey="username" fontSize={9} fontWeight="bold" />
-                      <PolarRadiusAxis domain={[0, 100]} fontSize={8} stroke="transparent" />
-                      <Radar name="Updates" dataKey="updates" stroke="hsl(var(--primary))" fill="hsl(var(--primary))" fillOpacity={0.4} />
-                      <Radar name="Chats" dataKey="chats" stroke="#F43F5E" fill="#F43F5E" fillOpacity={0.25} />
-                      <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: 'none', borderRadius: '6px', fontSize: '11px' }} />
-                    </RadarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Productivity Trend */}
-              <div className="premium-card p-7 relative overflow-hidden">
-                <div className="absolute top-0 left-0 w-32 h-32 orb-emerald -ml-16 -mt-16" />
-                <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground mb-6 flex items-center gap-2">
-                  <TrendingUp size={14} className="text-emerald-500" /> Productivity Velocity
-                </h3>
-                <div className="h-56">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={analData?.workspaceAnalytics?.productivityTrend || []}>
-                      <defs>
-                        <linearGradient id="colorVal" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
-                          <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
-                        </linearGradient>
-                      </defs>
-                      <XAxis dataKey="label" stroke="hsl(var(--border))" fontSize={9} fontWeight="bold" />
-                      <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '6px', fontSize: '11px' }} />
-                      <Area type="monotone" dataKey="value" stroke="hsl(var(--primary))" strokeWidth={2.5} fillOpacity={1} fill="url(#colorVal)" />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Update Scatter − full width */}
-              <div className="premium-card p-7 md:col-span-2">
-                <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground mb-6 flex items-center gap-2">
-                  <Activity size={14} className="text-primary" /> Update Interaction Velocity
-                </h3>
-                <div className="h-56">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <ScatterChart margin={{ top: 10, right: 10, bottom: 10, left: 10 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.5} />
-                      <XAxis type="category" dataKey="date" stroke="hsl(var(--border))" fontSize={9} />
-                      <YAxis type="number" dataKey="count" stroke="hsl(var(--border))" fontSize={9} />
-                      <Tooltip cursor={{ strokeDasharray: '3 3' }} contentStyle={{ backgroundColor: 'hsl(var(--card))', borderRadius: '6px', fontSize: '11px' }} />
-                      <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold' }} />
-                      <Scatter name="Documents" data={analData?.workspaceAnalytics?.updateFrequency?.filter((f: any) => f.type === 'text') || []} fill="#3B82F6" />
-                      <Scatter name="Sheets" data={analData?.workspaceAnalytics?.updateFrequency?.filter((f: any) => f.type === 'sheet') || []} fill="#10B981" />
-                    </ScatterChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Communication Pie */}
-              <div className="premium-card p-7">
-                <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground mb-6 flex items-center gap-2">
-                  <MessageSquare size={14} className="text-primary" /> Communication Intensity
-                </h3>
-                <div className="h-56">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={analData?.workspaceAnalytics?.chatIntensity || []} cx="50%" cy="50%" innerRadius={35} outerRadius={70} dataKey="value" stroke="none">
-                        {(analData?.workspaceAnalytics?.chatIntensity || []).map((entry: any, i: number) => (
-                          <Cell key={i} fill={entry.color} />
-                        ))}
-                      </Pie>
-                      <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', borderRadius: '6px', fontSize: '11px' }} />
-                      <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold' }} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Talent Allocation Bar − full */}
-              <div className="premium-card p-7 lg:col-span-3">
-                <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground mb-6 flex items-center gap-2">
-                  <BarIcon size={14} className="text-primary" /> Talent Allocation
-                </h3>
-                <div className="h-56">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={analData?.workspaceAnalytics?.resourceAllocation || []}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
-                      <XAxis dataKey="label" stroke="hsl(var(--border))" fontSize={10} fontWeight="bold" />
-                      <YAxis stroke="hsl(var(--border))" fontSize={10} fontWeight="bold" />
-                      <Tooltip cursor={{ fill: 'hsl(var(--secondary))' }} contentStyle={{ backgroundColor: 'hsl(var(--card))', borderRadius: '6px', fontSize: '11px' }} />
-                      <Bar dataKey="value" radius={[4, 4, 0, 0]} barSize={36}>
-                        {(analData?.workspaceAnalytics?.resourceAllocation || []).map((entry: any, i: number) => (
-                          <Cell key={i} fill={entry.color} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-            </div>
-          )}
         </main>
       )}
 
-      {/* ── MEMBERS VIEW ── */}
-      {activeView === 'members' && (
-        <main className="max-w-7xl mx-auto px-6 lg:px-10 py-10 animate-fade-scale-in relative z-10">
-          <div className="flex items-center justify-between mb-8">
-            <div>
-              <h2 className="text-3xl font-black gradient-text">Team Members</h2>
-              <p className="text-xs text-muted-foreground font-bold uppercase tracking-widest mt-1">{members.length} member{members.length !== 1 ? 's' : ''} collaborating</p>
-            </div>
-            {isAdmin && (
-              <button
-                onClick={() => router.push(`/workspace/${id}/settings`)}
-                className="flex items-center gap-2 px-5 py-2.5 bg-card border border-border text-foreground font-bold hover:bg-secondary transition-all text-sm"
-              >
-                <Settings size={16} /> Manage Team
-              </button>
-            )}
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {members.map((m: any, i: number) => (
-              <div key={m.user.id} className="premium-card p-6 flex items-center gap-4 animate-slide-up" style={{ animationDelay: `${i * 60}ms` }}>
-                <div
-                  className="w-12 h-12 flex items-center justify-center text-base text-white font-black shadow-lg shrink-0"
-                  style={{
-                    background: `hsl(${(i * 137) % 360}, 65%, 55%)`,
-                    borderRadius: '50%'
-                  }}
-                >
-                  {m.user.email[0].toUpperCase()}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="font-bold text-foreground text-sm truncate">{m.user.email}</p>
-                  <div className="flex items-center gap-2 mt-1.5">
-                    <MemberRoleBadge role={m.role} />
-                    <span className="flex items-center gap-1 text-[10px] text-emerald-500 font-bold">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                      Active
-                    </span>
-                  </div>
-                </div>
-                <div className="text-muted-foreground opacity-30">
-                  {m.role === 'admin' ? <Shield size={18} /> : m.role === 'editor' ? <Edit3 size={18} /> : <Eye size={18} />}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {members.length === 0 && (
-            <div className="py-24 text-center border-2 border-dashed border-border flex flex-col items-center animate-fade-scale-in">
-              <div className="w-16 h-16 bg-secondary text-muted-foreground flex items-center justify-center mb-4 animate-float">
-                <Users size={28} />
-              </div>
-              <h3 className="text-xl font-black text-foreground">No Team Members Yet</h3>
-              <p className="text-sm text-muted-foreground mt-2">Invite collaborators from the document editor.</p>
-            </div>
-          )}
-        </main>
-      )}
-
-      {/* CREATE DOCUMENT MODAL */}
+      {/* CREATE MODAL */}
       {showCreateModal && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-900/50 backdrop-blur-sm"
-          onClick={e => e.target === e.currentTarget && setShowCreateModal(false)}
-        >
-          <div className="bg-card w-full max-w-md shadow-2xl border border-border animate-fade-scale-in">
-            <div className="p-7 border-b border-border">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className={`p-3 ${createType === 'sheet' ? 'bg-emerald-50 dark:bg-emerald-900/20' : 'bg-blue-50 dark:bg-blue-900/20'}`}>
-                    {createType === 'sheet'
-                      ? <Table size={20} className="text-emerald-500" />
-                      : <FileText size={20} className="text-blue-500" />
-                    }
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-black">New {createType === 'sheet' ? 'Spreadsheet' : 'Document'}</h3>
-                    <p className="text-xs text-muted-foreground font-medium mt-0.5">Add a new collaborative asset</p>
-                  </div>
-                </div>
-                <button onClick={() => setShowCreateModal(false)} className="p-2 hover:bg-secondary text-muted-foreground transition-all">
-                  <X size={20} />
-                </button>
-              </div>
-            </div>
-
-            <div className="p-7 space-y-5">
-              {/* Type selector */}
-              <div className="grid grid-cols-2 gap-3">
-                {(['text', 'sheet'] as const).map(t => (
-                  <button
-                    key={t}
-                    onClick={() => setCreateType(t)}
-                    className={`p-4 border-2 text-left transition-all ${createType === t
-                      ? t === 'sheet'
-                        ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20'
-                        : 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
-                      : 'border-border hover:border-primary'
-                    }`}
-                  >
-                    {t === 'sheet' ? <Table size={18} className="text-emerald-500 mb-2" /> : <FileText size={18} className="text-blue-500 mb-2" />}
-                    <p className="text-xs font-bold">{t === 'sheet' ? 'Spreadsheet' : 'Document'}</p>
-                    <p className="text-[11px] text-muted-foreground">{t === 'sheet' ? 'Data & analysis' : 'Collaborative text'}</p>
-                  </button>
-                ))}
-              </div>
-
-              <div>
-                <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground block mb-2">
-                  Asset Title
-                </label>
-                <input
-                  ref={createInputRef}
-                  type="text"
-                  placeholder={createType === 'sheet' ? 'e.g. Q2 Revenue Sheet' : 'e.g. Product Roadmap'}
-                  value={createTitle}
-                  onChange={e => setCreateTitle(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleCreateSubmit()}
-                  className="w-full px-4 py-3.5 bg-secondary border border-border text-foreground outline-none focus:ring-2 ring-primary/15 focus:border-primary transition-all font-medium"
-                />
-              </div>
-
-              <button
-                disabled={creating || !createTitle.trim()}
-                onClick={handleCreateSubmit}
-                className={`w-full py-4 text-white font-bold shadow-xl hover:opacity-90 transition-all disabled:opacity-50 flex items-center justify-center gap-2 ${
-                  createType === 'sheet'
-                    ? 'bg-gradient-to-r from-emerald-500 to-teal-500 shadow-emerald-200 dark:shadow-emerald-900/30'
-                    : 'bg-gradient-to-r from-blue-500 to-indigo-500 shadow-blue-200 dark:shadow-blue-900/30'
-                }`}
-              >
-                {creating ? (
-                  <><RefreshCcw size={18} className="animate-spin" /> Creating...</>
-                ) : (
-                  <><Plus size={18} className="stroke-[3]" /> Create {createType === 'sheet' ? 'Spreadsheet' : 'Document'}</>
-                )}
-              </button>
-            </div>
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-900/50 backdrop-blur-sm" onClick={e => e.target === e.currentTarget && setShowCreateModal(false)}>
+          <div className="bg-card w-full max-w-md shadow-2xl border border-border animate-fade-scale-in p-7">
+            {createType === 'log' ? (
+               <>
+                 <div className="flex items-center gap-3 mb-8"><div className="p-3 bg-emerald-50"><Timer size={20} className="text-emerald-500" /></div><h3 className="text-lg font-black uppercase tracking-tight">Log Working Hours</h3></div>
+                 <div className="space-y-6"><div><label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground block mb-2">Duration (Minutes)</label><div className="flex items-center gap-3"><input type="number" value={logDuration} onChange={e => setLogDuration(e.target.value)} className="flex-1 px-4 py-4 bg-secondary border border-border text-foreground outline-none font-bold" /><div className="bg-secondary px-4 py-4 border border-border font-bold text-xs">MINS</div></div></div><div><label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground block mb-2">Internal Statement</label><textarea value={logDesc} onChange={e => setLogDesc(e.target.value)} className="w-full h-24 px-4 py-4 bg-secondary border border-border text-foreground outline-none font-bold resize-none" placeholder="Describe your activity..."></textarea></div><button onClick={handleCreateSubmit} disabled={creating} className="w-full py-4 bg-emerald-600 text-white font-black uppercase tracking-widest hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-200 dark:shadow-emerald-900/20">{creating ? 'Processing...' : 'Secure Log Entry'}</button></div>
+               </>
+            ) : (
+               <>
+                 <div className="flex items-center gap-3 mb-8"><div className={`p-3 ${createType === 'sheet' ? 'bg-emerald-50' : createType === 'task' ? 'bg-purple-50' : 'bg-blue-50'}`}>{createType === 'sheet' ? <Table size={20} className="text-emerald-500" /> : createType === 'task' ? <Trello size={20} className="text-purple-500" /> : <FileText size={20} className="text-blue-500" />}</div><h3 className="text-lg font-black uppercase tracking-tight">New {createType === 'task' ? 'Kanban Task' : createType === 'sheet' ? 'Spreadsheet' : 'Document'}</h3></div>
+                 <input ref={createInputRef} type="text" placeholder="Internal Asset Title..." value={createTitle} onChange={e => setCreateTitle(e.target.value)} className="w-full px-4 py-4 bg-secondary border border-border text-foreground outline-none mb-6 font-bold" />
+                 <button disabled={creating || !createTitle.trim()} onClick={handleCreateSubmit} className={`w-full py-4 text-white font-black uppercase tracking-widest transition-all ${createType === 'task' ? 'bg-purple-600' : createType === 'sheet' ? 'bg-emerald-600' : 'bg-blue-600'}`}>{creating ? 'Syncing...' : 'Deploy Asset'}</button>
+               </>
+            )}
           </div>
         </div>
       )}

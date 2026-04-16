@@ -6,17 +6,31 @@ type Task {
     priority: String! # 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'
     workspace: Workspace!
     assignee: User
+    timeLogs: [TimeLog!]
+    totalMinutesLogged: Int
     createdAt: String
     updatedAt: String
+}
+
+type TimeLog {
+    id: ID!
+    task: Task!
+    user: User!
+    durationMinutes: Int!
+    description: String
+    logDate: String
+    createdAt: String
 }
 
 extend type Query {
     getTasks(workspaceId: ID!): [Task!]!
     getTask(id: ID!): Task
+    getTimeLogs(workspaceId: ID!, taskId: ID): [TimeLog!]!
 }
 
 extend type Mutation {
     createTask(workspaceId: ID!, title: String!, status: String, priority: String, assigneeId: ID): Task
     updateTask(id: ID!, title: String, description: String, status: String, priority: String, assigneeId: ID): Task
     deleteTask(id: ID!): Boolean
+    logTime(taskId: ID!, durationMinutes: Int!, description: String, logDate: String): TimeLog
 }

@@ -25,6 +25,7 @@ type Presence {
     cursorX: Float
     cursorY: Float
     isTyping: Boolean
+    inHuddle: Boolean
 }
 
 type Message {
@@ -35,12 +36,26 @@ type Message {
     createdAt: String!
 }
 
+type WebRTCSignal {
+    documentId: ID!
+    senderId: ID!
+    targetId: ID!
+    signal: String!
+}
+
+type PublicDashboardPayload {
+    dashboardDoc: Document!
+    sourceDocContent: String!
+}
+
+
 extend type Query {
     documents(workspaceId: ID!): [Document]
     document(id: ID!): Document
     activeUsers(documentId: ID!): [Presence]
     documentVersions(documentId: ID!): [DocumentVersion]
     messages(documentId: ID!): [Message]
+    publicDashboard(id: ID!): PublicDashboardPayload
 }
 
 extend type Mutation {
@@ -48,12 +63,14 @@ extend type Mutation {
     updateDocument(id: ID!, content: String, title: String, config: String): Document
     deleteDocument(id: ID!): Boolean
     restoreVersion(documentId: ID!, versionId: ID!): Document
-    updatePresence(documentId: ID!, cursorOffset: Int, cursorRow: Int, cursorCol: Int, cursorX: Float, cursorY: Float, isTyping: Boolean): Presence
+    updatePresence(documentId: ID!, cursorOffset: Int, cursorRow: Int, cursorCol: Int, cursorX: Float, cursorY: Float, isTyping: Boolean, inHuddle: Boolean): Presence
     sendMessage(documentId: ID!, text: String!): Message
+    sendWebRTCSignal(documentId: ID!, targetId: ID!, signal: String!): Boolean
 }
 
 extend type Subscription {
     documentUpdated: Document
     presenceChanged(documentId: ID!): [Presence]
     messageSent(documentId: ID!): Message
+    webRTCSignalReceived(documentId: ID!, targetId: ID!): WebRTCSignal
 }

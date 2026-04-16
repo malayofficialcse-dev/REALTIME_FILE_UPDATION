@@ -44,6 +44,26 @@ export const documentResolver = {
         [documentId]
       );
       return res.rows;
+    },
+    publicDashboard: async (_, { id }) => {
+      const docRes = await pool.query('SELECT * FROM documents WHERE id = $1', [id]);
+      const dashboardDoc = docRes.rows[0];
+      if (!dashboardDoc) throw new Error('Dashboard not found');
+      if (dashboardDoc.type !== 'dashboard') throw new Error('Not a dashboard');
+
+      let sourceDocContent = "[]";
+      if (dashboardDoc.config) {
+        try {
+          const cfg = JSON.parse(dashboardDoc.config);
+          if (cfg.sourceId) {
+            const srcRes = await pool.query('SELECT content FROM documents WHERE id = $1', [cfg.sourceId]);
+            if (srcRes.rows.length > 0) sourceDocContent = srcRes.rows[0].content;
+          }
+        } catch (e) {
+          console.error("Dashboard Config Parse Error:", e);
+        }
+      }
+      return { dashboardDoc, sourceDocContent };
     }
   },
 
@@ -141,21 +161,24 @@ export const documentResolver = {
       return true;
     },
 
-    updatePresence: async (_, { documentId, cursorOffset, cursorRow, cursorCol, cursorX, cursorY, isTyping }, { user }) => {
+    updatePresence: async (_, { documentId, cursorOffset, cursorRow, cursorCol, cursorX, cursorY, isTyping, inHuddle }, { user }) => {
       if (!user) throw new Error('Not authenticated');
       const userRes = await pool.query('SELECT email FROM users WHERE id = $1', [user.userId]);
       const email = userRes.rows[0].email;
 
+      const oldPresence = presenceStore.get(`${user.userId}-${documentId}`) || {};
+      
       const presence = {
         userId: user.userId,
         email: email,
         documentId,
-        cursorOffset,
-        cursorRow,
-        cursorCol,
-        cursorX,
-        cursorY,
-        isTyping,
+        cursorOffset: cursorOffset !== undefined ? cursorOffset : oldPresence.cursorOffset,
+        cursorRow: cursorRow !== undefined ? cursorRow : oldPresence.cursorRow,
+        cursorCol: cursorCol !== undefined ? cursorCol : oldPresence.cursorCol,
+        cursorX: cursorX !== undefined ? cursorX : oldPresence.cursorX,
+        cursorY: cursorY !== undefined ? cursorY : oldPresence.cursorY,
+        isTyping: isTyping !== undefined ? isTyping : oldPresence.isTyping,
+        inHuddle: inHuddle !== undefined ? inHuddle : oldPresence.inHuddle,
         lastActive: new Date().toISOString(),
         lastTimestamp: Date.now()
       };
@@ -188,6 +211,19 @@ export const documentResolver = {
       });
       
       return message;
+    },
+    sendWebRTCSignal: async (_, { documentId, targetId, signal }, { user }) => {
+      if (!user) throw new Error('Not authenticated');
+      
+      pubsub.publish('WEBRTC_SIGNAL', {
+        webRTCSignalReceived: {
+          documentId,
+          senderId: user.userId,
+          targetId,
+          signal
+        }
+      });
+      return true;
     }
   },
 
@@ -208,6 +244,15 @@ export const documentResolver = {
         () => pubsub.asyncIterator(['MESSAGE_SENT']),
         (payload, variables) => {
           return String(payload.documentId) === String(variables.documentId);
+        }
+      )
+    },
+    webRTCSignalReceived: {
+      subscribe: withFilter(
+        () => pubsub.asyncIterator(['WEBRTC_SIGNAL']),
+        (payload, variables) => {
+          return String(payload.webRTCSignalReceived.documentId) === String(variables.documentId) &&
+                 String(payload.webRTCSignalReceived.targetId) === String(variables.targetId);
         }
       )
     }

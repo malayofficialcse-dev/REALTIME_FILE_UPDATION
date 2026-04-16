@@ -26,26 +26,18 @@ export const notificationResolver = {
       if (targetUser.rows.length === 0) throw new Error('User not found');
       const targetUserId = targetUser.rows[0].id;
       
-      // Check if already a member
       const memberCheck = await pool.query(
         'SELECT id FROM workspace_members WHERE user_id = $1 AND workspace_id = $2',
         [targetUserId, workspaceId]
       );
       if (memberCheck.rows.length > 0) throw new Error('User is already a member');
       
-      // Avoid duplicate pending invites
-      const inviteCheck = await pool.query(
-        "SELECT id FROM notifications WHERE user_id = $1 AND workspace_id = $2 AND status = 'PENDING'",
-        [targetUserId, workspaceId]
-      );
-      if (inviteCheck.rows.length > 0) throw new Error('Invitation already sent');
-
       const message = `You have been invited to join a workspace as ${role}.`;
 
       const result = await pool.query(
-        `INSERT INTO notifications(user_id, sender_id, workspace_id, type, role, message) 
+        `INSERT INTO notifications(user_id, sender_id, workspace_id, type, status, message) 
          VALUES($1, $2, $3, $4, $5, $6) RETURNING *`,
-        [targetUserId, user.userId, workspaceId, 'INVITATION', role, message]
+        [targetUserId, user.userId, workspaceId, 'INVITATION', 'unread', message]
       );
       
       const notification = result.rows[0];
@@ -61,7 +53,7 @@ export const notificationResolver = {
       if (notifRes.rows.length === 0) throw new Error('Notification not found');
       
       const notification = notifRes.rows[0];
-      if (notification.status !== 'PENDING') throw new Error('Invitation already processed');
+      if (notification.type !== 'INVITATION') throw new Error('Not an invitation');
       
       await pool.query('UPDATE notifications SET status = $1 WHERE id = $2', [accept ? 'ACCEPTED' : 'DECLINED', notificationId]);
       
@@ -70,49 +62,36 @@ export const notificationResolver = {
           `INSERT INTO workspace_members(user_id, workspace_id, role) 
            VALUES($1, $2, $3) 
            ON CONFLICT (user_id, workspace_id) DO UPDATE SET role = EXCLUDED.role`,
-          [user.userId, notification.workspace_id, notification.role || 'viewer']
+          [user.userId, notification.workspace_id, 'editor']
         );
         
-        // Notify sender it was accepted
-        const senderMessage = `${user.email} accepted your invitation to join the workspace.`;
+        const senderMessage = `${user.email} accepted your invitation.`;
         const senderNotif = await pool.query(
           `INSERT INTO notifications(user_id, sender_id, workspace_id, type, status, message) 
            VALUES($1, $2, $3, $4, $5, $6) RETURNING *`,
-          [notification.sender_id, user.userId, notification.workspace_id, 'INVITE_ACCEPTED', 'READ', senderMessage]
+          [notification.sender_id, user.userId, notification.workspace_id, 'INVITE_ACCEPTED', 'unread', senderMessage]
         );
         pubsub.publish('NOTIFICATION_ADDED', { notificationAdded: senderNotif.rows[0] });
       }
       
       return true;
+    },
+
+    markAsRead: async (_, { notificationId }, { user }) => {
+      if (!user) throw new Error('Not authenticated');
+      await pool.query('UPDATE notifications SET status = $1 WHERE id = $2 AND user_id = $3', ['read', notificationId, user.userId]);
+      return true;
+    },
+
+    markAllAsRead: async (_, __, { user }) => {
+      if (!user) throw new Error('Not authenticated');
+      await pool.query('UPDATE notifications SET status = $1 WHERE user_id = $2', ['read', user.userId]);
+      return true;
     }
   },
   Subscription: {
     notificationAdded: {
-      subscribe: (_, __, { user }) => {
-        // Simple global publish but filter in asyncIterator using withFilter usually. 
-        // For simplicity we will filter here manually:
-        const iterator = pubsub.asyncIterator(['NOTIFICATION_ADDED']);
-        return {
-          [Symbol.asyncIterator]() { return this; },
-          async next() {
-            while (true) {
-              const result = await iterator.next();
-              if (result.done) return result;
-              
-              // Note: PubSub currently does not get access to { user } context effectively in this simple setup
-              // unless we use context from subscriptionServer. 
-              // We will just let it stream back. Ideally it's filtered.
-              // For demonstration purposes, if it's the right user, return it:
-              if (result.value?.notificationAdded?.user_id === user?.userId || !user?.userId) {
-                 return result; // Or if no user provided down the wire
-              }
-              // It's a hack: we return it anyway and let frontend filter, or we skip
-              return result; 
-            }
-          },
-          return: iterator.return?.bind(iterator)
-        };
-      }
+      subscribe: () => pubsub.asyncIterator(['NOTIFICATION_ADDED'])
     }
   },
   Notification: {

@@ -9,10 +9,12 @@ import {
   Type, Palette, PaintBucket, Copy, Trash2, ArrowUp, ArrowDown, ArrowRight,
   Users, Plus, Moon, Sun, UserPlus, Check, Search, MessageSquare, Sparkles, Send, Activity, Upload,
   Underline, List, ListOrdered, Quote, AlignJustify, Lock, Unlock, Zap, Edit3, Eye, Bell, User,
-  PlusCircle, LayoutGrid, Layers, Filter, ArrowUpDown, ChevronDown
+  PlusCircle, LayoutGrid, Layers, Filter, ArrowUpDown, ChevronDown, Phone, PhoneOff
 } from 'lucide-react';
 import { Providers, useTheme } from '@/components/providers';
 import * as XLSX from 'xlsx';
+import WebRTCHuddle from '@/components/WebRTCHuddle';
+import BlockEditor from '@/components/BlockEditor';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   LineChart, Line, PieChart as RePieChart, Pie, Cell, AreaChart, Area,
@@ -352,6 +354,7 @@ export default function DocumentPage() {
   
   const [activeCell, setActiveCell] = useState<{ r: number, c: number } | null>(null);
   const [isTyping, setIsTyping] = useState(false);
+  const [inHuddle, setInHuddle] = useState(false);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [changedCells, setChangedCells] = useState<Set<string>>(new Set());
   const prevGridRef = useRef<string>("");
@@ -717,13 +720,18 @@ export default function DocumentPage() {
           cursorRow: activeCell?.r,
           cursorCol: activeCell?.c,
           isTyping,
+          inHuddle,
           ...overrides
         }
       });
     } catch (err) {
       // Ignore presence errors
     }
-  }, [activeTabId, activeCell, isTyping, updatePresence]);
+  }, [activeTabId, activeCell, isTyping, inHuddle, updatePresence]);
+
+  useEffect(() => {
+    sendPresence();
+  }, [inHuddle, sendPresence]);
 
   const trackCaretPosition = useCallback(() => {
     if (type !== 'text' || !editorRef.current) return;
@@ -1008,6 +1016,25 @@ export default function DocumentPage() {
     setChartDescription('');
     setLabelColIndex(0);
     setValueColIndices([1]);
+  };
+
+  const handleExportDashboard = async () => {
+    if (!charts.length) {
+      alert("Please generate at least one chart first to export a dashboard.");
+      return;
+    }
+    try {
+      const configStr = JSON.stringify({ sourceId: activeTabId, charts });
+      const { data: created } = await createDoc({ 
+        variables: { workspaceId: wId, title: (doc?.title || "Untitled") + ' Dashboard', type: 'dashboard' } 
+      });
+      if (created?.createDocument) {
+        await updateDoc({ variables: { id: created.createDocument.id, config: configStr } });
+        window.open(`/dashboard/${created.createDocument.id}`, '_blank');
+      }
+    } catch (e) {
+      alert("Failed to export dashboard.");
+    }
   };
 
   const getChartDataMulti = (chart: any) => {
@@ -1316,6 +1343,13 @@ export default function DocumentPage() {
 
   return (
     <div className="min-h-screen mesh-bg flex flex-col text-foreground overflow-hidden">
+      <WebRTCHuddle 
+        documentId={activeTabId} 
+        currentUserId={data?.me?.id} 
+        activeUsers={activeUsers} 
+        inHuddle={inHuddle} 
+        onLeaveHuddle={() => setInHuddle(false)} 
+      />
       
       {/* ── HEADER ── */}
       <header className="glass-header px-4 lg:px-6 py-3 flex items-center justify-between sticky top-0 z-50 shrink-0">
@@ -1399,6 +1433,17 @@ export default function DocumentPage() {
               </div>
             )}
           </div>
+
+          <div className="h-6 w-[1px] bg-border mx-1" />
+
+          {/* Huddle Mode Button */}
+          <button 
+            onClick={() => setInHuddle(!inHuddle)} 
+            className={`flex items-center gap-1.5 px-3 py-1.5 transition-all outline-none rounded-md text-xs font-bold shadow-sm ${inHuddle ? 'bg-red-500 hover:bg-red-600 text-white animate-pulse' : 'bg-primary/20 hover:bg-primary/30 text-primary'}`}
+          >
+            {inHuddle ? <PhoneOff size={14} /> : <Phone size={14} />}
+            <span className="hidden sm:inline">Huddle</span>
+          </button>
 
           <div className="h-6 w-[1px] bg-border mx-1" />
 
@@ -1769,6 +1814,14 @@ export default function DocumentPage() {
                         <LayoutGrid size={14} /> {isDashboardMode ? 'Exit Dashboard' : 'Consolidate View'}
                       </button>
                     )}
+                    {charts.length > 0 && (
+                      <button 
+                        onClick={handleExportDashboard} 
+                        className="ml-2 flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 text-white text-xs font-bold rounded shadow-lg shadow-purple-200 dark:shadow-none hover:bg-purple-700 transition-all"
+                      >
+                        <Share2 size={14} /> Share Dashboard
+                      </button>
+                    )}
                     <button 
                       onClick={() => setShowFormattingModal(true)} 
                       className="ml-2 flex items-center gap-1.5 px-3 py-1.5 bg-rose-500 text-white text-xs font-bold rounded shadow-lg shadow-rose-200 dark:shadow-none hover:bg-rose-600 transition-all"
@@ -1813,32 +1866,29 @@ export default function DocumentPage() {
           {/* Editor Sandbox */}
           <main className="flex-1 overflow-auto bg-muted/30 p-6 lg:p-12 relative custom-scrollbar section-bg">
             {type === 'text' ? (
-              <div className="max-w-[850px] mx-auto">
-                <div 
-                  className="premium-card min-h-[1000px] p-12 sm:p-20 outline-none prose prose-slate dark:prose-invert max-w-none prose-headings:font-black prose-p:leading-loose text-lg shadow-2xl relative transition-all"
-                  contentEditable={!isViewer && !showHistory}
-                  onInput={(e) => setContent(e.currentTarget.innerHTML)}
-                  ref={editorRef}
-                  suppressContentEditableWarning
-                  placeholder="Start collaborating..."
-                >
-                  {/* Remote Carets */}
-                  {activeUsers.filter(u => u.userId !== data?.me?.id && u.cursorX !== null && u.cursorY !== null).map((u, ui) => (
-                    <div 
-                      key={u.userId}
-                      className="absolute w-[2px] h-6 bg-primary z-50 pointer-events-none transition-all duration-100"
-                      style={{ 
-                        left: (u.cursorX || 0), 
-                        top: (u.cursorY || 0),
-                        backgroundColor: `hsl(${(ui * 137) % 360}, 70%, 50%)`
-                      }}
-                    >
-                       <div className="absolute -top-4 left-0 px-1 py-0.5 text-[9px] text-white font-bold whitespace-nowrap rounded" style={{ backgroundColor: `hsl(${(ui * 137) % 360}, 70%, 50%)` }}>
-                          {u.email.split('@')[0]}
-                       </div>
-                    </div>
-                  ))}
-                </div>
+              <div className="max-w-[850px] mx-auto relative premium-card min-h-[1000px] shadow-2xl transition-all" ref={editorRef}>
+                <BlockEditor 
+                   initialContent={showHistory ? activeVersion : content} 
+                   onChange={(val) => setContent(val)} 
+                   isViewer={isViewer || showHistory}
+                />
+                
+                {/* Remote Carets */}
+                {activeUsers.filter(u => u.userId !== data?.me?.id && u.cursorX !== null && u.cursorY !== null).map((u, ui) => (
+                  <div 
+                    key={u.userId}
+                    className="absolute w-[2px] h-6 z-50 pointer-events-none transition-all duration-100"
+                    style={{ 
+                      left: (u.cursorX || 0), 
+                      top: (u.cursorY || 0),
+                      backgroundColor: `hsl(${(ui * 137) % 360}, 70%, 50%)`
+                    }}
+                  >
+                     <div className="absolute -top-4 left-0 px-1 py-0.5 text-[9px] text-white font-bold whitespace-nowrap rounded" style={{ backgroundColor: `hsl(${(ui * 137) % 360}, 70%, 50%)` }}>
+                        {u.email.split('@')[0]}
+                     </div>
+                  </div>
+                ))}
               </div>
             ) : (
               <div className="inline-block min-w-full">
